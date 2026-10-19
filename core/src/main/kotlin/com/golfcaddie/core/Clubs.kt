@@ -144,7 +144,7 @@ object ClubRecommender {
         if (idx == -1) {
             val longest = full.last()
             return Recommendation(
-                targetMeters, longest, full.getOrNull(full.size - 2), null,
+                targetMeters, longest, null, null,
                 Recommendation.Kind.CANNOT_REACH,
                 leftAfterMeters = targetMeters - longest.typicalMeters,
             )

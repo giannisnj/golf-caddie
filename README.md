@@ -58,8 +58,17 @@ a phone or emulator. Or from the command line, with the Android SDK installed:
   ./gradlew -PcoreOnly :core:run --args="my_course.json 56.3440 -2.8060"  # stand at a lat/lon
   ```
 
-- **Unit tests**: `./gradlew -PcoreOnly :core:test` plays a synthetic 3-hole course
-  (`core/src/test/resources/synthetic_course.json`) from fake positions.
+  If the Overpass servers are down or block your network, `tools/osm_api_fetch.py "Royal Canberra Golf Club" out.json`
+  looks the course up by name and downloads it from the main OpenStreetMap API instead (for testing only).
+
+## Tests
+
+- `./gradlew -PcoreOnly :core:test` (no Android SDK needed): a synthetic 3-hole course, plus two real
+  OpenStreetMap courses that each exposed a bug: Moore Park, Sydney (outline drawn too small) and
+  Domat/Ems, Switzerland (27 holes in loops, numbers repeat).
+- `./gradlew :app:testDebugUnitTest`: runs the real app on a simulated Android device (Robolectric, no
+  emulator) on Moore Park: simulate mode, the real GPS path fed fake fixes, recording a shot, the Clubs
+  screen. Screenshots go to `app/build/screenshots/`.
 
 ## Limitations
 

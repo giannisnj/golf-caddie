@@ -58,8 +58,12 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
             }
             if (state.course != null) {
                 TextButton(onClick = { vm.shiftHole(-1) }) { Text("◀") }
-                val par = state.situation?.hole?.par?.let { " · Par $it" } ?: ""
-                Text("Hole ${state.holeNumber ?: "-"}$par", fontWeight = FontWeight.Bold)
+                val hole = state.situation?.hole
+                val par = hole?.par?.let { " · Par $it" } ?: ""
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Hole ${hole?.number ?: "-"}$par", fontWeight = FontWeight.Bold)
+                    hole?.name?.let { Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+                }
                 TextButton(onClick = { vm.shiftHole(1) }) { Text("▶") }
                 if (state.holeLocked) TextButton(onClick = vm::setAutoHole) { Text("Auto") }
             }

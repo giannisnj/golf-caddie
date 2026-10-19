@@ -42,7 +42,8 @@ data class UiState(
     val hasLocationPermission: Boolean = false,
     val position: GeoPoint? = null,
     val accuracyMeters: Float? = null,
-    val holeNumber: Int? = null,
+    /** OSM id of the hole being played (numbers repeat at clubs with several loops). */
+    val holeId: Long? = null,
     /** True when the player picked the hole by hand; turns off auto-detection. */
     val holeLocked: Boolean = false,
     val situation: Situation? = null,
@@ -106,7 +107,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     fun jumpToTee() {
         val s = _state.value
         val hole = currentHole(s) ?: s.course?.holes?.firstOrNull() ?: return
-        _state.update { it.copy(holeNumber = hole.number) }
+        _state.update { it.copy(holeId = hole.id) }
         setPosition(Simulator.atTee(hole))
     }
 
@@ -162,7 +163,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectCourse(course: Course) {
-        _state.update { it.copy(course = course, holeNumber = course.holes.firstOrNull()?.number, holeLocked = false) }
+        _state.update { it.copy(course = course, holeId = course.holes.firstOrNull()?.id, holeLocked = false) }
         if (_state.value.simulate) jumpToTee() else recompute()
     }
 
@@ -171,9 +172,9 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         val holes = s.course?.holes ?: return
         if (holes.isEmpty()) return
-        val idx = holes.indexOfFirst { it.number == s.holeNumber }.coerceAtLeast(0)
+        val idx = holes.indexOfFirst { it.id == s.holeId }.coerceAtLeast(0)
         val next = holes[(idx + delta).mod(holes.size)]
-        _state.update { it.copy(holeNumber = next.number, holeLocked = true) }
+        _state.update { it.copy(holeId = next.id, holeLocked = true) }
         if (s.simulate) setPosition(Simulator.atTee(next)) else recompute()
     }
 
@@ -182,18 +183,18 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         recompute()
     }
 
-    private fun currentHole(s: UiState) = s.course?.holes?.firstOrNull { it.number == s.holeNumber }
+    private fun currentHole(s: UiState) = s.course?.holes?.firstOrNull { it.id == s.holeId }
 
     private fun recompute() {
         _state.update { s ->
             val course = s.course
             val pos = s.position
             if (course == null || pos == null) return@update s.copy(situation = null, recommendation = null)
-            val hole = if (s.holeLocked) currentHole(s) else Caddie.locateHole(course, pos, s.holeNumber)
+            val hole = if (s.holeLocked) currentHole(s) else Caddie.locateHole(course, pos, s.holeId)
             if (hole == null) return@update s.copy(situation = null, recommendation = null)
             val situation = Caddie.situation(course, hole, pos)
             s.copy(
-                holeNumber = hole.number,
+                holeId = hole.id,
                 situation = situation,
                 recommendation = ClubRecommender.recommend(situation.targetMeters, s.bag, situation.onGreen),
             )

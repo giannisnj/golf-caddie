@@ -23,6 +23,7 @@ object Overpass {
     val ENDPOINTS = listOf(
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
     )
 
     /** Overpass QL that fetches every golf feature within [radiusMeters] of a point. */
@@ -42,6 +43,9 @@ object Overpass {
     }
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    /** Max gap between one hole's green and the next hole's tee when linking stray holes. */
+    private const val LINK_M = 250.0
 
     private class Feature(
         val id: Long,
@@ -80,25 +84,81 @@ object Overpass {
 
         val courses = if (courseAreas.isEmpty()) {
             if (holes.isEmpty()) emptyList()
-            else listOf(Course(0, "Golf course", emptyList(), holes.sortedBy { it.number }, hazards))
+            else listOf(Course(0, "Golf course", emptyList(), playingOrder(holes), hazards))
         } else {
-            courseAreas.map { area ->
-                val ring = area.firstRing
-                val courseHoles = holes.filter { Geo.contains(ring, it.greenCenter) || Geo.contains(ring, it.tee) }
-                val courseHazards = hazards.filter { h -> Geo.contains(ring, Geo.centroid(h.polygon)) }
+            // Clubs are often mapped twice (clubhouse way + multipolygon); bigger areas claim holes first.
+            val areas = courseAreas.sortedByDescending { a -> a.rings.sumOf { it.size } }
+                .map { a -> a to a.rings.filter { it.size >= 3 } }
+            val members = areas.map { mutableListOf<Hole>() }
+            val unclaimed = holes.toMutableList()
+            for ((i, area) in areas.withIndex()) {
+                val inside = unclaimed.filter { h ->
+                    area.second.any { Geo.contains(it, h.greenCenter) || Geo.contains(it, h.tee) }
+                }
+                members[i] += inside
+                unclaimed -= inside.toSet()
+            }
+            // Course outlines in OSM are sometimes drawn too small. A hole outside every outline
+            // joins the course it connects to: its tee near their green, or its green near their tee.
+            var changed = true
+            while (changed && unclaimed.isNotEmpty()) {
+                changed = false
+                for (h in unclaimed.toList()) {
+                    val i = members.indexOfFirst { course ->
+                        course.any { Geo.distance(it.greenCenter, h.tee) < LINK_M || Geo.distance(h.greenCenter, it.tee) < LINK_M }
+                    }
+                    if (i >= 0) {
+                        members[i] += h
+                        unclaimed -= h
+                        changed = true
+                    }
+                }
+            }
+            areas.mapIndexed { i, (area, rings) ->
+                val courseHoles = members[i]
                 Course(
                     id = area.id,
                     name = area.tags["name"] ?: "Golf course",
-                    boundary = ring,
-                    holes = courseHoles.sortedBy { it.number },
-                    hazards = courseHazards,
+                    areas = rings,
+                    holes = playingOrder(courseHoles),
+                    hazards = hazards.filter { h ->
+                        val c = Geo.centroid(h.polygon)
+                        rings.any { Geo.contains(it, c) } || courseHoles.any { Geo.distanceToPolyline(c, it.line) < 60.0 }
+                    },
                 )
-            }.filter { it.holes.isNotEmpty() }
+            }.filter { it.holes.isNotEmpty() } +
+                listOfNotNull(unclaimed.takeIf { it.isNotEmpty() }?.let {
+                    Course(-1, "Golf course", emptyList(), playingOrder(it), hazards)
+                })
         }
 
         return if (near == null) courses else courses.sortedBy { c ->
-            if (c.boundary.size >= 3 && Geo.contains(c.boundary, near)) 0.0 else Geo.distance(near, c.center)
+            if (c.contains(near)) 0.0 else Geo.distance(near, c.center)
         }
+    }
+
+    /**
+     * Orders holes the way they're played. With unique numbers that's just 1..18. Clubs with
+     * several loops repeat numbers, so each loop is chained by walking from a green to the
+     * nearest tee of the next number.
+     */
+    internal fun playingOrder(holes: List<Hole>): List<Hole> {
+        if (holes.map { it.number }.toSet().size == holes.size) return holes.sortedBy { it.number }
+        val left = holes.sortedBy { it.id }.toMutableList()
+        val ordered = mutableListOf<Hole>()
+        while (left.isNotEmpty()) {
+            var cur = left.minBy { it.number }
+            left.remove(cur)
+            ordered += cur
+            while (true) {
+                val next = left.filter { it.number == cur.number + 1 }
+                    .minByOrNull { Geo.distance(cur.greenCenter, it.tee) } ?: break
+                left.remove(next)
+                ordered += next
+                cur = next
+            }
+        }
+        return ordered
     }
 
     private fun buildHole(
@@ -116,11 +176,15 @@ object Overpass {
             ?: emptyList()
         val target = if (green.size >= 3) Geo.centroid(green) else end
         val pin = pins.firstOrNull { (green.size >= 3 && Geo.contains(green, it)) || Geo.distance(it, target) < 25.0 }
-        val number = f.tags["ref"]?.trim()?.toIntOrNull()
-            ?: f.tags["name"]?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
+        // Refs are usually "7", but "Altberg 7" or "18Bis" occur too.
+        val digits = Regex("\\d+")
+        val number = f.tags["ref"]?.let { digits.find(it)?.value?.toIntOrNull() }
+            ?: f.tags["name"]?.let { digits.find(it)?.value?.toIntOrNull() }
             ?: (index + 1)
         return Hole(
+            id = f.id,
             number = number,
+            name = f.tags["name"]?.takeIf { it.isNotBlank() },
             par = f.tags["par"]?.toIntOrNull(),
             handicap = f.tags["handicap"]?.toIntOrNull(),
             line = line,

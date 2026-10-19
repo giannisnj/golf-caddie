@@ -6,14 +6,17 @@ import kotlinx.serialization.Serializable
 data class Course(
     val id: Long,
     val name: String,
-    /** Outline of the course property; may be empty when OSM has no boundary. */
-    val boundary: List<GeoPoint>,
+    /** Outline(s) of the course property; empty when OSM has no boundary. */
+    val areas: List<List<GeoPoint>>,
+    /** In playing order; a 27-hole club comes out as loops, e.g. 1-18 then the other 1-9. */
     val holes: List<Hole>,
     val hazards: List<Hazard>,
 ) {
+    fun contains(p: GeoPoint): Boolean = areas.any { Geo.contains(it, p) }
+
     val center: GeoPoint
         get() = when {
-            boundary.size >= 3 -> Geo.centroid(boundary)
+            areas.isNotEmpty() -> Geo.centroid(areas.maxBy { it.size })
             holes.isNotEmpty() -> GeoPoint(
                 holes.flatMap { it.line }.map { it.lat }.average(),
                 holes.flatMap { it.line }.map { it.lon }.average(),
@@ -24,8 +27,12 @@ data class Course(
 
 @Serializable
 data class Hole(
+    /** OSM way id: unique, unlike [number] at clubs with several loops. */
+    val id: Long,
     /** Hole number from the OSM `ref` tag (1..18). */
     val number: Int,
+    /** Hole name, if the course names its holes. */
+    val name: String? = null,
     val par: Int? = null,
     val handicap: Int? = null,
     /** Playing line from tee to green as mapped in OSM (`golf=hole` way). */

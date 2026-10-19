@@ -40,17 +40,17 @@ object Caddie {
     private const val MIN_HAZARD_CARRY_M = 5.0
 
     /**
-     * Works out which hole the player is on. Prefers [currentHole] unless another hole is
+     * Works out which hole the player is on. Prefers [currentHoleId] unless another hole is
      * clearly closer, so walking past a neighbouring fairway doesn't flip the hole.
      */
-    fun locateHole(course: Course, player: GeoPoint, currentHole: Int? = null): Hole? {
+    fun locateHole(course: Course, player: GeoPoint, currentHoleId: Long? = null): Hole? {
         if (course.holes.isEmpty()) return null
         fun score(h: Hole): Double =
             if (h.green.size >= 3 && Geo.contains(h.green, player)) 0.0
             else Geo.distanceToPolyline(player, h.line)
 
         val best = course.holes.minBy(::score)
-        val current = course.holes.firstOrNull { it.number == currentHole } ?: return best
+        val current = course.holes.firstOrNull { it.id == currentHoleId } ?: return best
         return if (score(current) <= score(best) + HOLE_SWITCH_MARGIN_M) current else best
     }
 

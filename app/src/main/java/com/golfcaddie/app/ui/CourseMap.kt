@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.viewinterop.AndroidView
 import com.golfcaddie.core.Course
 import com.golfcaddie.core.GeoPoint
@@ -67,7 +68,8 @@ fun CourseMap(
     }
 
     AndroidView(
-        modifier = modifier,
+        // MapView draws its overlays past its own edges; keep it inside its slot.
+        modifier = modifier.clipToBounds(),
         factory = { ctx ->
             MapView(ctx).apply {
                 setMultiTouchControls(true)
@@ -91,7 +93,7 @@ fun CourseMap(
                 })
             }
             course?.holes?.forEach { h ->
-                val isCurrent = h.number == hole?.number
+                val isCurrent = h.id == hole?.id
                 if (h.green.size >= 3) map.overlays.add(Polygon(map).apply {
                     setPoints(h.green.map { it.osm() })
                     fillPaint.color = Color.argb(if (isCurrent) 170 else 90, 60, 200, 90)
@@ -124,11 +126,12 @@ fun CourseMap(
             map.invalidate()
 
             // Frame the hole (tee, green and you) whenever the hole or course changes.
-            val key = "${course?.id}/${hole?.number}"
+            val key = "${course?.id}/${hole?.id}"
             if (hole != null && key != camera.framedKey) {
                 camera.framedKey = key
                 val pts = (hole.line + hole.green + listOfNotNull(player)).map { it.osm() }
-                map.post { map.zoomToBoundingBox(BoundingBox.fromGeoPoints(pts), false, 80) }
+                // Generous border so the player marker (drawn above its point) isn't clipped.
+                map.post { map.zoomToBoundingBox(BoundingBox.fromGeoPoints(pts), false, 160) }
             } else if (hole == null && player != null && camera.framedKey == null) {
                 map.controller.setCenter(player.osm())
             }

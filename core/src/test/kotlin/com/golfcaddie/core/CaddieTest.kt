@@ -24,7 +24,7 @@ class CaddieTest {
         assertEquals("Test Links (synthetic)", course.name)
         assertEquals(listOf(1, 2, 3), course.holes.map { it.number })
         assertEquals(listOf(4, 3, 5), course.holes.map { it.par })
-        assertTrue(course.boundary.first() == course.boundary.last(), "relation outers stitched into a ring")
+        assertTrue(course.areas.single().let { it.first() == it.last() }, "relation outers stitched into a ring")
         assertTrue(hole(1).green.size > 3)
         assertNotNull(hole(1).pin)
         assertNull(hole(2).pin)
@@ -93,9 +93,9 @@ class CaddieTest {
     fun holeDetectionSticksWithCurrentHoleNearBoundary() {
         // Hole 2's tee (50,380) sits near hole 1's green (0,350).
         val betweenHoles = Simulator.onLine(hole(1), metersFromGreen = 0.0).let { Geo.destination(it, 70.0, 30.0) }
-        assertEquals(1, Caddie.locateHole(course, betweenHoles, currentHole = 1)!!.number)
+        assertEquals(1, Caddie.locateHole(course, betweenHoles, currentHoleId = hole(1).id)!!.number)
         // Standing right on hole 2's tee, it switches.
-        assertEquals(2, Caddie.locateHole(course, Simulator.atTee(hole(2)), currentHole = 1)!!.number)
+        assertEquals(2, Caddie.locateHole(course, Simulator.atTee(hole(2)), currentHoleId = hole(1).id)!!.number)
     }
 
     @Test

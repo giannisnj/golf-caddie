@@ -74,6 +74,7 @@ class ClubRecommenderTest {
         assertEquals(Recommendation.Kind.CANNOT_REACH, rec.kind)
         assertEquals("driver", rec.club!!.club.id)
         assertEquals(60.0, rec.leftAfterMeters!!, 0.01)
+        assertNull(rec.shorterOption, "a shorter club can't help when even the longest can't reach")
     }
 
     @Test
