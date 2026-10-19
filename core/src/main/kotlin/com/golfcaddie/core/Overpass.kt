@@ -19,11 +19,18 @@ import kotlinx.serialization.json.long
  *  - `golf=pin`             a flag position (rare)
  */
 object Overpass {
-    /** Public endpoints. All are free; please keep request volume low and cache results. */
+    /**
+     * Public endpoints. All are free; please keep request volume low and cache results.
+     * overpass-api.de hands each request to one of its two servers, lz4 and z; when that one
+     * answers 502, asking the other directly often works. The other mirrors come and go: in
+     * October 2026 both were down for days.
+     */
     val ENDPOINTS = listOf(
         "https://overpass-api.de/api/interpreter",
-        "https://overpass.kumi.systems/api/interpreter",
+        "https://z.overpass-api.de/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter",
         "https://overpass.private.coffee/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
     )
 
     /**
@@ -157,9 +164,12 @@ object Overpass {
                 })
         }
 
-        return if (near == null) courses else courses.sortedBy { c ->
-            if (c.contains(near)) 0.0 else Geo.distance(near, c.center)
-        }
+        return if (near == null) courses else nearestFirst(courses, near)
+    }
+
+    /** The course you're standing on first, then the rest by distance to their centers. */
+    fun nearestFirst(courses: List<Course>, near: GeoPoint): List<Course> = courses.sortedBy { c ->
+        if (c.contains(near)) 0.0 else Geo.distance(near, c.center)
     }
 
     /** Areas with a vertex within 80 m of a hole line: tree lines beside fairways, not a park across town. */

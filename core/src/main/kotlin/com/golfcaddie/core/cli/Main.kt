@@ -6,6 +6,7 @@ import com.golfcaddie.core.Caddie
 import com.golfcaddie.core.ClubRecommender
 import com.golfcaddie.core.Conditions
 import com.golfcaddie.core.Course
+import com.golfcaddie.core.CourseBundle
 import com.golfcaddie.core.DistanceUnit
 import com.golfcaddie.core.ElevationGrid
 import com.golfcaddie.core.GeoPoint
@@ -30,13 +31,17 @@ import kotlin.math.roundToInt
  *   ./gradlew -PcoreOnly :core:run --args="course.json 56.3440 -2.8060"  stand at a lat/lon
  *   ./gradlew -PcoreOnly :core:run --args="course.json --elevation=grid.json --wind=5@200 --temp=12"
  *   ./gradlew -PcoreOnly :core:run --args="elevation course.json grid.json"  fetch heights (Open-Meteo)
+ *   ./gradlew -PcoreOnly :core:run --args="bundle out.json <region> <lat> <lon> <radius_m> <date> way_123.json relation_456.json ..."
  *
- * course.json is an Overpass response; tools/fetch_course.sh downloads one.
+ * course.json is an Overpass response; tools/fetch_course.sh downloads one. For `bundle`, each file
+ * is named after the OSM course it was downloaded for, and gets that course's heights fetched;
+ * tools/build_bundle.sh runs the whole thing.
  * --wind=<m/s>@<degrees the wind blows from>.
  */
 fun main(args: Array<String>) {
     require(args.isNotEmpty()) { "usage: [elevation] <overpass.json> [lat lon] [--elevation=grid.json] [--wind=ms@deg] [--temp=C]" }
     if (args[0] == "elevation") return fetchElevation(args[1], args[2])
+    if (args[0] == "bundle") return buildBundle(args.drop(1))
 
     val options = args.filter { it.startsWith("--") }.associate { it.removePrefix("--").substringBefore("=") to it.substringAfter("=") }
     val positional = args.filterNot { it.startsWith("--") }
@@ -56,19 +61,46 @@ fun main(args: Array<String>) {
 /** Fetches an elevation grid for the course with the most holes in [overpassFile]. */
 private fun fetchElevation(overpassFile: String, outFile: String) {
     val course = Overpass.parse(File(overpassFile).readText()).maxBy { it.holes.size }
+    val grid = heightsFor(course)
+    File(outFile).writeText(Json.encodeToString(ElevationGrid.serializer(), grid))
+    println("Heights ${grid.meters.min()}..${grid.meters.max()} m -> $outFile")
+}
+
+private fun heightsFor(course: Course): ElevationGrid {
     val plan = ElevationGrid.planFor(course)
     println("${course.name}: ${plan.rows} x ${plan.cols} grid, ${plan.points.size} points")
     val heights = plan.points.chunked(ElevationGrid.POINTS_PER_REQUEST).flatMap { chunk ->
         val url = "https://api.open-meteo.com/v1/elevation?latitude=" + chunk.joinToString(",") { "%.6f".format(it.lat) } +
             "&longitude=" + chunk.joinToString(",") { "%.6f".format(it.lon) }
-        val body = URI(url).toURL().readText()
-        Thread.sleep(300)
+        // Open-Meteo counts each point as a call, 600 a minute: 100 points every 10 s stays under.
+        val body = (1..5).firstNotNullOfOrNull { attempt ->
+            runCatching { URI(url).toURL().readText() }.onFailure {
+                println("  ${it.message?.take(40)}; waiting ${attempt * 30} s")
+                Thread.sleep(attempt * 30_000L)
+            }.getOrNull()
+        } ?: error("Open-Meteo kept refusing")
+        Thread.sleep(10_500)
         Json.parseToJsonElement(body).jsonObject["elevation"]!!.jsonArray.map { it.jsonPrimitive.double }
     }
-    val grid = plan.withHeights(heights)
-    File(outFile).writeText(Json.encodeToString(ElevationGrid.serializer(), grid))
-    println("Heights ${heights.min()}..${heights.max()} m -> $outFile")
+    return plan.withHeights(heights)
 }
+
+/** Courses for the app to ship: one per Overpass file, the one whose OSM id is in the file name. */
+private fun buildBundle(args: List<String>) {
+    val (outFile, region, lat, lon, radius, date) = args
+    val courses = args.drop(6).map { file ->
+        val id = Regex("""(\d+)\.json$""").find(file)!!.groupValues[1].toLong()
+        val course = Overpass.parse(File(file).readText()).singleOrNull { it.id == id }
+            ?: error("$file has no course with OSM id $id")
+        println("${course.name}: ${course.holes.size} holes, ${course.hazards.size} hazards")
+        course.copy(elevation = heightsFor(course))
+    }.sortedBy { it.name }
+    val bundle = CourseBundle(region, GeoPoint(lat.toDouble(), lon.toDouble()), radius.toDouble(), date, courses)
+    File(outFile).writeText(Json.encodeToString(CourseBundle.serializer(), bundle))
+    println("${courses.size} courses -> $outFile (${File(outFile).length() / 1024} KB)")
+}
+
+private operator fun <T> List<T>.component6() = this[5]
 
 private fun play(course: Course, args: List<String>, conditions: Conditions?) {
     val bag = Bag.default()
