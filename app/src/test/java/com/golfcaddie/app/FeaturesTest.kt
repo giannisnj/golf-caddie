@@ -5,6 +5,9 @@ import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performImeAction
+import org.robolectric.Shadows.shadowOf
 import com.github.takahirom.roborazzi.captureRoboImage
 import com.golfcaddie.app.map.MapSources
 import com.golfcaddie.app.map.OfflineMaps
@@ -44,9 +47,8 @@ class FeaturesTest : AppTestBase() {
 
     private fun goToHole(index: Int) {
         // Simulate GPS starts on hole 1's tee; ▶ moves (and teleports) to the next hole.
-        compose.onNodeWithText("Simulate GPS").performClick()
-        repeat(index) { compose.onNodeWithText("▶").performClick() }
-        compose.waitForIdle()
+        toggleSimulate()
+        repeat(index) { nextHole() }
     }
 
     @Test
@@ -58,9 +60,12 @@ class FeaturesTest : AppTestBase() {
 
         launch()
         goToHole(i)
-        val text = CaddieText.playsLike(plays, DistanceUnit.YARDS)!!
-        compose.onNodeWithText(text).assertExists()
-        compose.onNodeWithText(CaddieText.playsLikeWhy(plays, DistanceUnit.YARDS)).assertExists()
+        assertTrue(CaddieText.playsLike(plays, DistanceUnit.YARDS) != null)
+        compose.onNodeWithText("PLAYS LIKE").assertExists()
+        compose.onNodeWithText(com.golfcaddie.app.ui.formatDistance(plays.playsMeters, DistanceUnit.YARDS)).assertExists()
+        CaddieText.playsLikeReasons(plays, DistanceUnit.YARDS).forEach {
+            compose.onNodeWithText(it.text.replaceFirstChar { c -> c.uppercase() }).assertExists()
+        }
         // The club is picked for the plays-like distance, not the flat one.
         val club = ClubRecommender.recommend(plays.playsMeters, Bag.default()).club!!.club.name
         assertEquals(club, viewModel().state.value.recommendation!!.club!!.club.name)
@@ -83,13 +88,14 @@ class FeaturesTest : AppTestBase() {
         }
 
         launch()
-        compose.onNodeWithText("Simulate GPS").performClick()
+        toggleSimulate()
         val vm = viewModel()
         vm.onMapTap(spot)
         compose.waitForIdle()
         val state = vm.state.value
         val warning = state.advice.filterIsInstance<Advice.InPlay>().first()
-        compose.onNodeWithText("⚠ " + CaddieText.advice(warning, DistanceUnit.YARDS)).assertExists()
+        compose.onNodeWithText(CaddieText.inPlayTitle(warning.hazard, DistanceUnit.YARDS)).assertExists()
+        compose.onNodeWithText(CaddieText.inPlayBody(warning)).assertExists()
         settle(2)
         compose.onRoot().captureRoboImage("build/screenshots/6_hazard_advice.png")
     }
@@ -109,11 +115,12 @@ class FeaturesTest : AppTestBase() {
         }
         compose.onNodeWithText("Clubs").performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("Gapping: your usual range with each club").assertExists()
+        compose.onNodeWithText("5+ of your shots").assertExists()
         compose.onRoot().captureRoboImage("build/screenshots/7_gapping_chart.png")
-        // Tapping the 7 Iron's bar opens its card, with the range and the left/right tendency.
+        // Tapping the 7 Iron's row opens its page, with the range and the left/right tendency.
         compose.onAllNodesWithText("7 Iron").onFirst().performClick()
-        waitForText("tends 9 yd right", substring = true)
+        waitForText("9 yd right")
+        compose.onNodeWithText("Usual range".uppercase()).assertExists()
         compose.onRoot().captureRoboImage("build/screenshots/7b_club_card.png")
     }
 
@@ -126,7 +133,7 @@ class FeaturesTest : AppTestBase() {
         val s = state.situation!!
         assertEquals("Hole ${s.hole.number}" + (s.hole.par?.let { " · Par $it" } ?: ""), watch.hole)
         // The big number on the watch is the big number on the phone.
-        compose.onNodeWithText("${watch.center} yd").assertExists()
+        assertHero(watch.center!!)
         assertEquals(state.recommendation!!.club!!.club.name, watch.club)
         assertEquals(state.recommendation!!.club!!.club.id, watch.recommendedClubId)
         // Survives the trip over the Data Layer.
@@ -141,12 +148,12 @@ class FeaturesTest : AppTestBase() {
     @Test
     fun coursePlanStyleNeedsNoMapImages() {
         launch()
+        goToHole(3)
         compose.onNodeWithText("Satellite").performClick()
-        compose.onNodeWithText("Street").performClick()
+        compose.onNodeWithText("Course plan").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("Course plan").assertExists()
         compose.onNodeWithText("Course data © OpenStreetMap contributors").assertExists()
-        goToHole(3)
         settle(1)
         compose.onRoot().captureRoboImage("build/screenshots/8_course_plan.png")
     }
@@ -156,8 +163,43 @@ class FeaturesTest : AppTestBase() {
         assertEquals(MapSources.esri, MapSources.satelliteFor(course))
         launch()
         compose.onNodeWithText("Course").performClick()
-        waitForText("No free satellite imagery here allows saving for offline use", substring = true)
+        waitForText("Satellite map can't be saved here")
         compose.onRoot().captureRoboImage("build/screenshots/9_course_tab_sydney.png")
+    }
+
+    @Test
+    fun searchingByNameFindsABuiltInCanberraCourse() {
+        launch()
+        compose.onNodeWithText("Course").performClick()
+        // Before October 2026's fix a failed search showed nothing on this tab: the spinner just stopped.
+        compose.onNodeWithText("Courses near me").performClick()
+        waitForText("No position yet")
+        compose.onNodeWithText("Search by name, or wait for GPS.").assertExists()
+        // Once there is a position, the card goes rather than going stale.
+        scenario.onActivity { viewModel().setSimulate(true) }
+        compose.waitForIdle()
+        compose.onNodeWithText("No position yet").assertDoesNotExist()
+
+        compose.onNodeWithText("Course name or town").performTextInput("yowani")
+        compose.onNode(androidx.compose.ui.test.hasSetTextAction()).performImeAction()
+        waitForText("Current")
+        assertEquals("Yowani Country Club", viewModel().state.value.course?.name)
+        waitForText("Slopes included")
+        compose.onRoot().captureRoboImage("build/screenshots/12_search_built_in_canberra.png")
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "+night")
+    fun darkThemeFollowsThePhone() {
+        launch()
+        goToHole(9)
+        compose.onNodeWithText("Satellite").performClick()
+        compose.onNodeWithText("Course plan").performClick()
+        settle(1)
+        compose.onRoot().captureRoboImage("build/screenshots/13_dark_play.png")
+        compose.onNodeWithText("Clubs").performClick()
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage("build/screenshots/14_dark_clubs.png")
     }
 
     @Test
@@ -166,6 +208,7 @@ class FeaturesTest : AppTestBase() {
             .maxBy { it.holes.size }
         assertEquals(MapSources.act, MapSources.satelliteFor(canberra))
         saveCourses(canberra)
+        shadowOf(app).grantPermissions(android.Manifest.permission.ACCESS_FINE_LOCATION)
         launch()
         compose.onNodeWithText("Course").performClick()
         waitForText("Save satellite map for offline")

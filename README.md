@@ -11,6 +11,10 @@ with each club.
    tee-to-green line (`golf=hole`, with `ref` = hole number and `par`), plus greens, tees, fairways,
    bunkers and water. The app downloads the golf features within 3 km and keeps them on the phone for
    offline play. Look a course up by name with OSM's free Nominatim geocoder (Course tab).
+   **Canberra's 11 courses are built into the app** (`app/src/main/assets/courses/canberra.json`, with
+   slopes), so finding them is instant and needs no signal. The public Overpass servers are often busy:
+   in October 2026 they took 30–45 s to answer and often returned 502, and both backup servers were down.
+   Elsewhere the app works through the servers in turn, retrying for up to about 3 minutes.
 2. **Your position**: the phone's GPS through Android's built-in `LocationManager` (no Google Play
    Services or API key needed).
 3. **Distances**: front, center and back of the green, and the reach/carry distance of any bunker or
@@ -51,6 +55,20 @@ Three map styles (the chip on the Play screen cycles them):
 
 Distances, slopes, advice and the watch all work with no signal; only map images and live weather need it.
 
+## Design
+
+The screens follow the Golf Caddie design canvas made in Claude Design (October 2026): a light theme
+built for direct sun and a dark one for evenings (it follows the phone's setting). Green is the caddie
+talking, amber means watch out, red means something is broken, blue is you.
+
+- Theme: `app/src/main/java/com/golfcaddie/app/ui/theme/Theme.kt` (Material 3 colour roles, the extra
+  `GolfColors`, the Barlow type scale with tabular figures, corner radii); icons in `GolfIcons.kt`.
+- Font: [Barlow](https://github.com/jpt/barlow), © The Barlow Project Authors, SIL Open Font License,
+  in `res/font/` with its licence in `assets/licenses/`.
+- Play: the hole bar, the map with its style and unit controls, and the caddie panel, which pulls up
+  over the map. Clubs: a gapping chart that opens each club. Course: current course, live weather,
+  offline map, find a course.
+
 ## Project layout
 
 | Module | What | Builds without Android SDK |
@@ -77,8 +95,9 @@ for a release, sign both with the same key.
 
 ## Testing with a fake position
 
-- **In the app**: turn on **Simulate GPS**. Tap anywhere on the map to stand there, use **Tee** to jump
-  to the current hole's tee, and **+25 yd** to walk toward the green. Use ◀ ▶ to change holes.
+- **In the app**: open the ⋮ menu and turn on **Simulate GPS**. Tap anywhere on the map to stand there,
+  use **Tee** to jump to the current hole's tee, and **+25 yd** to walk toward the green. Use the arrows
+  either side of the hole number to change holes.
 - **Android emulator**: leave Simulate off. In *Extended controls (⋯) > Location*, set a point or play
   a GPX/KML route, or run `adb emu geo fix <lon> <lat>` (longitude comes first).
 - **Real device**: pick a mock-location app under *Developer options > Select mock location app*.
@@ -95,6 +114,17 @@ for a release, sign both with the same key.
   `tools/osm_api_fetch.py "Royal Canberra Golf Club" out.json` looks the course up by name and downloads
   it from the main OpenStreetMap API instead (for testing only).
 
+## Rebuilding the built-in courses
+
+```sh
+tools/build_bundle.sh canberra -35.30 149.12 30000
+```
+
+This downloads every course with mapped holes within 30 km of Canberra, one at a time and retrying
+when Overpass is busy, adds slopes from Open-Meteo, and writes `app/src/main/assets/courses/canberra.json`.
+Any `<region>.json` in that folder is used the same way, so another city is a second run with its own
+centre and radius.
+
 ## Tests
 
 - `./gradlew -PcoreOnly :core:test` (no Android SDK needed): a synthetic course, real OpenStreetMap
@@ -109,6 +139,8 @@ for a release, sign both with the same key.
 
 ## Limitations
 
+- The built-in Canberra courses are a snapshot (the date is in the file). Changes mapped in OSM after
+  that need a rebuild of the pack.
 - Coverage depends on OpenStreetMap: in October 2026 all 11 Canberra courses and about two thirds of
   Sydney's had their holes mapped (`docs/coverage_canberra_sydney_2026-10.csv`). Anyone can add holes at
   openstreetmap.org, and the app reports when a course has none.

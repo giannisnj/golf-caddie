@@ -56,20 +56,21 @@ class GpsTest : AppTestBase() {
         })
         val hole6 = course.holes.single { it.number == 6 }
         val hole7 = course.holes.single { it.number == 7 }
-        fun header(h: Hole) = "Hole ${h.number}" + (h.par?.let { " · Par $it" } ?: "")
 
         // Phone already knows roughly where it is (on the 6th tee); the user has allowed location.
         gpsFix(Simulator.atTee(hole6))
         shadowOf(app).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION)
         launch()
-        waitForText(header(hole6))
+        waitForText("Hole ${hole6.number}")
+        assertHoleBar(hole6)
 
         // Live update: walk onto the 7th fairway, 140 m from the green.
         val spot = Simulator.onLine(hole7, metersFromGreen = 140.0)
         gpsFix(spot)
-        waitForText(header(hole7))
-        compose.onNodeWithText("${yd(Geo.distance(spot, hole7.greenCenter))} yd").assertExists()
-        compose.onNodeWithText("GPS accuracy ±5 yd").assertExists()
+        waitForText("Hole ${hole7.number}")
+        assertHoleBar(hole7)
+        assertHero("${yd(Geo.distance(spot, hole7.greenCenter))}")
+        compose.onNodeWithText("GPS ±5 yd").assertExists()
         settle()
         compose.onRoot().captureRoboImage("build/screenshots/3_real_gps_hole7.png")
     }

@@ -10,6 +10,9 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.printToString
@@ -124,5 +127,28 @@ abstract class AppTestBase {
     }
 
     protected fun yd(meters: Double) = (meters / 0.9144).roundToInt()
+
+    /** Simulate GPS lives in the ⋮ menu. */
+    protected fun toggleSimulate() {
+        compose.onNodeWithContentDescription("More options").performClick()
+        compose.onNodeWithText("Simulate GPS").performClick()
+        compose.waitForIdle()
+    }
+
+    protected fun nextHole() {
+        compose.onNodeWithContentDescription("Next hole").performClick()
+        compose.waitForIdle()
+    }
+
+    /** The big middle-of-green number. */
+    protected fun assertHero(text: String) {
+        compose.onNodeWithTag(com.golfcaddie.app.ui.HERO_TAG).assertTextEquals(text)
+    }
+
+    /** The hole bar shows "Hole 7" with "Par 3" beside it. */
+    protected fun assertHoleBar(h: Hole) {
+        compose.onNodeWithText("Hole ${h.number}").assertExists()
+        h.par?.let { compose.onNodeWithText("Par $it", substring = true).assertExists() }
+    }
 
 }

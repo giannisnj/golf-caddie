@@ -22,6 +22,8 @@ data class HazardOnLine(
     val onLine: Boolean = true,
     /** For a hazard beside the line: -1 left, +1 right (as you face the green); 0 across it. */
     val side: Int = 0,
+    /** Its outline, so the map can mark the one in play. */
+    val polygon: List<GeoPoint> = emptyList(),
 )
 
 data class Situation(
@@ -133,7 +135,7 @@ object Caddie {
                 -cx * uy + cy * ux > 0 -> -1
                 else -> 1
             }
-            HazardOnLine(hz.type, alongs.min(), alongs.max(), crossesLine, side)
+            HazardOnLine(hz.type, alongs.min(), alongs.max(), crossesLine, side, hz.polygon)
         }.sortedBy { it.reachMeters }
     }
 

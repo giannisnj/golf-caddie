@@ -15,12 +15,12 @@ data class WatchState(
     val center: String? = null,
     val back: String? = null,
     val unit: String = "yd",
-    /** e.g. "Plays 141 · into wind"; null when no adjustment applies. */
+    /** e.g. "Plays 141"; null when no adjustment applies. */
     val playsLike: String? = null,
     val club: String? = null,
     /** e.g. "138–152"; your usual range with that club. */
     val clubRange: String? = null,
-    /** First hazard warning, if any. */
+    /** First hazard warning, short: "Bunker L 130–147 · 2 in 10". */
     val warning: String? = null,
     /** Shown instead of distances when there's nothing to measure yet. */
     val status: String? = null,
@@ -29,6 +29,9 @@ data class WatchState(
     val recommendedClubId: String? = null,
     /** e.g. "7 Iron · 23 yd so far" while a shot is being walked. */
     val shotInProgress: String? = null,
+    /** The same shot in pieces for the watch's big layout: "7 Iron" and "23". */
+    val shotClub: String? = null,
+    val shotSoFar: String? = null,
 ) {
     fun encode(): String = json.encodeToString(serializer(), this)
 

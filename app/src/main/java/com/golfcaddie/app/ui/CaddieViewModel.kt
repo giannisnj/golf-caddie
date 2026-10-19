@@ -43,15 +43,37 @@ import java.util.UUID
 /** A shot that's been started (club chosen, start spot saved) but not yet walked to the ball. */
 data class PendingShot(val club: Club, val start: GeoPoint, val aim: GeoPoint? = null)
 
-/** Saving the course's map images for offline use. */
+/** Saving the course's map images for offline use. [tiles] is how many images that takes. */
 sealed interface OfflineMapStatus {
     data object Unknown : OfflineMapStatus
     /** No imagery with a licence that allows offline copies covers this course. */
     data object NotAvailable : OfflineMapStatus
-    data class NotSaved(val share: Double) : OfflineMapStatus
+    data class NotSaved(val share: Double, val tiles: Int) : OfflineMapStatus
     data class Saving(val done: Int, val total: Int) : OfflineMapStatus
-    data object Saved : OfflineMapStatus
-    data class Failed(val reason: String) : OfflineMapStatus
+    data class Saved(val tiles: Int) : OfflineMapStatus
+    /** Stopped part-way: [done] of [total] were saved before [reason]. */
+    data class Failed(val reason: String, val done: Int = 0, val total: Int = 0) : OfflineMapStatus
+}
+
+/** The outcome of "Ball is here", shown just above the main action on the Play screen. */
+sealed interface ShotNotice {
+    data class Saved(val club: String, val meters: Double) : ShotNotice
+    /** Tapped before walking to the ball: the shot stays open. */
+    data class TooShort(val meters: Double) : ShotNotice
+}
+
+/** Where a course search stands, shown in the Course tab's Find a course card. */
+sealed interface SearchStatus {
+    data object Idle : SearchStatus
+    data object Searching : SearchStatus
+    /** "Courses near me" with no GPS fix yet. */
+    data object NoPosition : SearchStatus
+    /** The name or town wasn't found at all. */
+    data class NothingFound(val query: String) : SearchStatus
+    /** The place was found, but OpenStreetMap has no golf holes mapped near it. */
+    data class NoHoles(val query: String?) : SearchStatus
+    /** Servers busy or down, or no signal; "Try again" repeats the search. */
+    data class Failed(val reason: String) : SearchStatus
 }
 
 data class UiState(
@@ -59,8 +81,10 @@ data class UiState(
     val bag: Bag = Bag.default(),
     val courses: List<Course> = emptyList(),
     val course: Course? = null,
-    val loading: Boolean = false,
-    val message: String? = null,
+    /** Canberra's courses, shipped in the app: listed on the Course tab, found with no signal. */
+    val builtInCourses: List<Course> = emptyList(),
+    val search: SearchStatus = SearchStatus.Idle,
+    val shotNotice: ShotNotice? = null,
     /** Simulation mode: position comes from map taps and the step buttons, not GPS. */
     val simulate: Boolean = false,
     val hasLocationPermission: Boolean = false,
@@ -86,6 +110,8 @@ data class UiState(
 ) {
     /** The hole being shown: the one you're on, or the one picked with ◀ ▶ before there's a position. */
     val hole: Hole? get() = situation?.hole ?: course?.holes?.firstOrNull { it.id == holeId }
+
+    val loading: Boolean get() = search == SearchStatus.Searching
 }
 
 class CaddieViewModel(app: Application) : AndroidViewModel(app) {
@@ -112,7 +138,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val course = cached.firstOrNull { it.id == settings.courseId } ?: cached.firstOrNull()
         _state.update {
             it.copy(
-                bag = bagRepo.load(), courses = cached, course = course,
+                bag = bagRepo.load(), courses = cached, course = course, builtInCourses = courseRepo.builtInCourses(),
                 unit = settings.unit, mapStyle = settings.mapStyle, liveWeather = settings.liveWeather,
             )
         }
@@ -183,48 +209,65 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun setPosition(p: GeoPoint) {
-        _state.update { it.copy(position = p) }
+        // "No position yet" from Courses near me is out of date once there is one.
+        _state.update { it.copy(position = p, search = if (it.search == SearchStatus.NoPosition) SearchStatus.Idle else it.search) }
         recompute()
     }
 
     // ---- Course & hole ----------------------------------------------------------------------
 
+    /** The last search, so "Try again" can repeat it. */
+    private var lastSearch: (() -> Unit)? = null
+
     fun findCoursesNearMe() {
+        lastSearch = ::findCoursesNearMe
         val p = _state.value.position
         if (p == null) {
-            _state.update { it.copy(message = "No position yet. Search by name, or wait for GPS.") }
+            _state.update { it.copy(search = SearchStatus.NoPosition) }
             return
         }
-        loadCourses { courseRepo.coursesNear(p) }
+        loadCourses(query = null) { courseRepo.coursesNear(p) }
     }
 
     fun searchCourses(name: String) {
         if (name.isBlank()) return
-        loadCourses {
-            val place = courseRepo.geocode(name) ?: error("Nothing found for \"$name\"")
+        lastSearch = { searchCourses(name) }
+        loadCourses(query = name) {
+            val place = courseRepo.geocode(name) ?: throw PlaceNotFound()
             courseRepo.coursesNear(place)
         }
     }
 
-    private fun loadCourses(block: suspend () -> List<Course>) {
+    /** A course from the built-in list: loads it and its neighbours, with it selected. */
+    fun pickBuiltIn(course: Course) {
+        lastSearch = { pickBuiltIn(course) }
+        loadCourses(query = course.name, select = course.id) { courseRepo.coursesNear(course.center) }
+    }
+
+    fun retrySearch() {
+        lastSearch?.invoke()
+    }
+
+    fun clearSearchStatus() = _state.update { it.copy(search = SearchStatus.Idle) }
+
+    private class PlaceNotFound : Exception()
+
+    private fun loadCourses(query: String?, select: Long? = null, block: suspend () -> List<Course>) {
         val seq = ++loadSeq
         viewModelScope.launch {
-            _state.update { it.copy(loading = true, message = null) }
-            try {
+            _state.update { it.copy(search = SearchStatus.Searching) }
+            val status = try {
                 val courses = block()
                 if (seq != loadSeq) return@launch // a newer search replaced this one
-                _state.update {
-                    it.copy(
-                        courses = courses,
-                        message = if (courses.isEmpty()) "No mapped golf holes found there in OpenStreetMap." else null,
-                    )
-                }
-                courses.firstOrNull()?.let(::selectCourse)
+                _state.update { it.copy(courses = courses) }
+                (courses.firstOrNull { it.id == select } ?: courses.firstOrNull())?.let(::selectCourse)
+                if (courses.isEmpty()) SearchStatus.NoHoles(query) else SearchStatus.Idle
+            } catch (e: PlaceNotFound) {
+                SearchStatus.NothingFound(query.orEmpty())
             } catch (e: Exception) {
-                if (seq == loadSeq) _state.update { it.copy(message = e.message ?: "Download failed") }
-            } finally {
-                if (seq == loadSeq) _state.update { it.copy(loading = false) }
+                SearchStatus.Failed(e.message ?: "Download failed")
             }
+            if (seq == loadSeq) _state.update { it.copy(search = status) }
         }
     }
 
@@ -245,7 +288,8 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
                 OfflineMapStatus.NotAvailable
             } else {
                 val share = runCatching { offlineMaps.savedShare(course, source) }.getOrDefault(0.0)
-                if (share >= 0.95) OfflineMapStatus.Saved else OfflineMapStatus.NotSaved(share)
+                val tiles = offlineMaps.tileCount(course)
+                if (share >= 0.95) OfflineMapStatus.Saved(tiles) else OfflineMapStatus.NotSaved(share, tiles)
             }
             _state.update { if (it.course?.id == course.id) it.copy(offlineMap = status) else it }
         }
@@ -352,16 +396,19 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         offlineJob?.cancel()
         offlineJob = viewModelScope.launch {
             _state.update { it.copy(offlineMap = OfflineMapStatus.Saving(0, 0)) }
+            var progress = 0 to 0
             val status = try {
                 when (val r = offlineMaps.save(course) { done, total ->
+                    progress = done to total
                     _state.update { it.copy(offlineMap = OfflineMapStatus.Saving(done, total)) }
                 }) {
                     OfflineMaps.Result.NotAvailable -> OfflineMapStatus.NotAvailable
                     is OfflineMaps.Result.Saved ->
-                        if (r.tiles == 0) OfflineMapStatus.Failed("No imagery covers this course") else OfflineMapStatus.Saved
+                        if (r.tiles == 0) OfflineMapStatus.Failed("No imagery covers this course")
+                        else OfflineMapStatus.Saved(r.tiles + r.missing)
                 }
             } catch (e: Exception) {
-                OfflineMapStatus.Failed(e.message ?: "Download failed")
+                OfflineMapStatus.Failed(e.message ?: "Download failed", progress.first, progress.second)
             }
             _state.update { it.copy(offlineMap = status) }
         }
@@ -374,7 +421,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         val p = s.position ?: return
         val aim = s.hole?.let { Caddie.aimPoint(it, p, ClubStats.of(club, s.bag.shots).typicalMeters) }
-        _state.update { it.copy(pendingShot = PendingShot(club, p, aim)) }
+        _state.update { it.copy(pendingShot = PendingShot(club, p, aim), shotNotice = null) }
     }
 
     /** From the watch: start a shot with the club whose id is [clubId]. */
@@ -389,20 +436,17 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val meters = Geo.distance(pending.start, end)
         if (meters < ClubStats.MIN_SHOT_METERS) {
             // Probably tapped before walking to the ball; keep the shot open.
-            _state.update {
-                it.copy(message = "Only ${formatDistance(meters, it.unit)} from where you hit. " +
-                    "Walk to your ball first, or tap Cancel to discard.")
-            }
+            _state.update { it.copy(shotNotice = ShotNotice.TooShort(meters)) }
             return
         }
         _state.update { it.copy(pendingShot = null) }
         addShot(pending.club.id, meters, pending.start, end, pending.aim)
-        _state.update {
-            it.copy(message = "Saved ${pending.club.name}: ${formatDistance(meters, it.unit)}")
-        }
+        _state.update { it.copy(shotNotice = ShotNotice.Saved(pending.club.name, meters)) }
     }
 
-    fun cancelShot() = _state.update { it.copy(pendingShot = null) }
+    fun cancelShot() = _state.update { it.copy(pendingShot = null, shotNotice = null) }
+
+    fun clearShotNotice() = _state.update { it.copy(shotNotice = null) }
 
     fun addShot(clubId: String, meters: Double, start: GeoPoint? = null, end: GeoPoint? = null, aim: GeoPoint? = null) {
         if (meters < ClubStats.MIN_SHOT_METERS) return
@@ -437,7 +481,6 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(mapStyle = style) }
     }
 
-    fun clearMessage() = _state.update { it.copy(message = null) }
 
     private companion object {
         const val WEATHER_REFRESH_MS = 15 * 60 * 1000L

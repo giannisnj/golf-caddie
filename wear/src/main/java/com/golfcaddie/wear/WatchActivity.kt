@@ -20,7 +20,7 @@ import kotlinx.coroutines.tasks.await
  * The phone does the GPS, course data and club maths; the watch is a display and a remote.
  */
 class WatchActivity : ComponentActivity(), DataClient.OnDataChangedListener {
-    private val state = mutableStateOf(WatchState(status = "Open Golf Caddie on your phone"))
+    private val state = mutableStateOf(WatchState(status = WAITING_FOR_PHONE))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.printToString
@@ -45,14 +46,12 @@ class PlayAndClubsTest : AppTestBase() {
     fun simulatedGpsWalksHoleOne() {
         launch()
         compose.onNodeWithText("Moore Park Golf Club").assertIsDisplayed()
-        compose.onNodeWithText("Simulate GPS").performClick()
-        compose.waitForIdle()
+        toggleSimulate()
 
         // Standing on the 1st tee.
         val hole1 = course.holes.first()
-        compose.onNodeWithText("Hole 1 · Par ${hole1.par}").assertExists()
-        val teeDistance = yd(Geo.distance(hole1.tee, hole1.greenCenter))
-        compose.onNodeWithText("$teeDistance yd").assertExists()
+        assertHoleBar(hole1)
+        assertHero("${yd(Geo.distance(hole1.tee, hole1.greenCenter))}")
         settle()
         compose.onRoot().captureRoboImage("build/screenshots/1_simulated_tee_hole1.png")
 
@@ -60,7 +59,7 @@ class PlayAndClubsTest : AppTestBase() {
         repeat(4) { compose.onNodeWithText("+25 yd").performClick() }
         compose.waitForIdle()
         val walked = Simulator.stepTowardGreen(hole1.tee, hole1, 4 * 25 * 0.9144)
-        compose.onNodeWithText("${yd(Geo.distance(walked, hole1.greenCenter))} yd").assertExists()
+        assertHero("${yd(Geo.distance(walked, hole1.greenCenter))}")
         settle(2)
         compose.onRoot().captureRoboImage("build/screenshots/2_simulated_100yd_walked.png")
     }
@@ -68,19 +67,23 @@ class PlayAndClubsTest : AppTestBase() {
     @Test
     fun recordShotByWalkingItThenSeeItInClubs() {
         launch()
-        compose.onNodeWithText("Simulate GPS").performClick()
+        toggleSimulate()
         compose.onNodeWithText("Record a shot").performClick()
         compose.waitForIdle()
+        compose.onNodeWithText("CADDIE'S PICK").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/3a_pick_club.png")
         compose.onAllNodesWithText("5 Iron", substring = true).onLast().performClick()
         compose.waitForIdle()
 
         // Walk 150 yd to the ball.
         repeat(6) { compose.onNodeWithText("+25 yd").performClick() }
         compose.waitForIdle()
+        compose.onNodeWithText("5 Iron: 150 yd so far").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/3c_walking.png")
         compose.onNodeWithText("Ball is here").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("Saved 5 Iron: 150 yd").assertExists()
-        compose.onNodeWithText("OK").performClick()
+        compose.onRoot().captureRoboImage("build/screenshots/3b_shot_saved.png")
 
         val shots = viewModel().state.value.bag.shots
         assertEquals(1, shots.size)
@@ -88,38 +91,54 @@ class PlayAndClubsTest : AppTestBase() {
 
         compose.onNodeWithText("Clubs").performClick()
         compose.waitForIdle()
-        // The gapping chart's 5 Iron bar opens the 5 Iron card.
+        // The gapping chart's 5 Iron row opens the 5 Iron page.
         compose.onAllNodesWithText("5 Iron").onFirst().performClick()
         compose.waitForIdle()
         // One shot isn't history yet: plans on 95% of the 150 yd max.
-        compose.onNodeWithText("Typical 143 yd · Max 150 yd · from max").assertExists()
+        compose.onNodeWithText("From your max").assertExists()
+        compose.onNodeWithText("143").assertExists()
+        compose.onNodeWithText("150").assertExists()
         compose.onRoot().captureRoboImage("build/screenshots/4_clubs_after_recording.png")
     }
 
     @Test
-    fun courseIsShownBeforeThereIsAPosition() {
+    fun thePanelPullsUpOverTheMap() {
         launch()
-        // No GPS and no simulation yet: the map frames the course instead of (0,0) in the ocean.
-        compose.onNodeWithText("Hole -").assertExists()
+        toggleSimulate()
+        compose.onNodeWithContentDescription("Pull up the caddie panel").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Lower the caddie panel").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/2b_panel_pulled_up.png")
+    }
+
+    @Test
+    fun courseIsShownBeforeThereIsAPosition() {
+        shadowOf(app).grantPermissions(Manifest.permission.ACCESS_FINE_LOCATION)
+        launch()
+        // No GPS fix yet: the map frames the course instead of (0,0) in the ocean, and the
+        // panel waits with dashes rather than zeros.
+        compose.onNodeWithText("Hole —").assertExists()
+        compose.onNodeWithText("Waiting for GPS").assertExists()
+        assertHero("—")
         settle(2)
         compose.onRoot().captureRoboImage("build/screenshots/0_course_before_position.png")
         // ▶ goes to hole 1 (it used to skip to hole 2), and the header shows it straight away.
-        compose.onNodeWithText("▶").performClick()
-        compose.waitForIdle()
-        compose.onNodeWithText("Hole 1 · Par ${course.holes.first().par}").assertExists()
+        nextHole()
+        assertHoleBar(course.holes.first())
     }
 
     @Test
     fun approximateLocationOnlyExplainsWhatToDo() {
         shadowOf(app).grantPermissions(Manifest.permission.ACCESS_COARSE_LOCATION)
         launch()
-        compose.onNodeWithText("Location is set to Approximate", substring = true).assertExists()
+        compose.onNodeWithText("Location is set to Approximate").assertExists()
+        compose.onNodeWithText("Use precise location").assertExists()
     }
 
     @Test
     fun tappingBallIsHereStraightAwayKeepsTheShotOpen() {
         launch()
-        compose.onNodeWithText("Simulate GPS").performClick()
+        toggleSimulate()
         compose.onNodeWithText("Record a shot").performClick()
         compose.waitForIdle()
         compose.onAllNodesWithText("Driver", substring = true).onLast().performClick()
@@ -127,8 +146,6 @@ class PlayAndClubsTest : AppTestBase() {
         compose.onNodeWithText("Ball is here").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("Walk to your ball first", substring = true).assertExists()
-        compose.onNodeWithText("OK").performClick()
-        compose.waitForIdle()
         assertEquals(0, viewModel().state.value.bag.shots.size)
         compose.onNodeWithText("Ball is here").assertExists()
     }
@@ -136,19 +153,20 @@ class PlayAndClubsTest : AppTestBase() {
     @Test
     fun leavingSimulationDropsTheFakePosition() {
         launch()
-        compose.onNodeWithText("Simulate GPS").performClick()
-        compose.waitForIdle()
-        compose.onNodeWithText("Simulate GPS").performClick()
-        compose.waitForIdle()
+        toggleSimulate()
+        toggleSimulate()
         assertEquals(null, viewModel().state.value.position)
-        compose.onNodeWithText("Location is off for this app", substring = true).assertExists()
+        compose.onNodeWithText("Location is off").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/0b_location_off.png")
     }
 
     @Test
     fun unitAndMapStyleSurviveARestart() {
         launch()
-        compose.onNodeWithText("yd").performClick()
-        compose.onNodeWithText("Satellite").performClick() // cycles to Street
+        toggleSimulate()
+        compose.onNodeWithText("m").performClick()
+        compose.onNodeWithText("Satellite").performClick() // opens the style menu
+        compose.onNodeWithText("Street").performClick()
         compose.waitForIdle()
         scenario.close()
         launch()

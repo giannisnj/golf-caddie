@@ -36,6 +36,9 @@ class OfflineMaps(context: Context) {
     /** Zoom 15 (whole course) to 19 (about 0.3 m per pixel, enough to see bunkers' edges). */
     val zooms = 15..19
 
+    /** How many map images saving [course] takes. */
+    fun tileCount(course: Course): Int = WebMercator.tilesFor(course, zooms).size
+
     suspend fun save(
         course: Course,
         zooms: IntRange = this.zooms,
