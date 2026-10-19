@@ -8,6 +8,7 @@ import android.os.Looper
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -87,7 +88,8 @@ class PlayAndClubsTest : AppTestBase() {
 
         compose.onNodeWithText("Clubs").performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("5 Iron").performClick()
+        // The gapping chart's 5 Iron bar opens the 5 Iron card.
+        compose.onAllNodesWithText("5 Iron").onFirst().performClick()
         compose.waitForIdle()
         // One shot isn't history yet: plans on 95% of the 150 yd max.
         compose.onNodeWithText("Typical 143 yd · Max 150 yd · from max").assertExists()
@@ -143,15 +145,15 @@ class PlayAndClubsTest : AppTestBase() {
     }
 
     @Test
-    fun unitAndSatelliteSurviveARestart() {
+    fun unitAndMapStyleSurviveARestart() {
         launch()
         compose.onNodeWithText("yd").performClick()
-        compose.onNodeWithText("Satellite").performClick()
+        compose.onNodeWithText("Satellite").performClick() // cycles to Street
         compose.waitForIdle()
         scenario.close()
         launch()
         val state = viewModel().state.value
         assertEquals(com.golfcaddie.core.DistanceUnit.METERS, state.unit)
-        assertEquals(false, state.satellite)
+        assertEquals(com.golfcaddie.app.map.MapStyle.STREET, state.mapStyle)
     }
 }

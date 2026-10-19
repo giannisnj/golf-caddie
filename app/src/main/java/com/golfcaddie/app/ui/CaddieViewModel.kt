@@ -6,19 +6,28 @@ import android.location.LocationManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.golfcaddie.app.data.BagRepository
+import com.golfcaddie.app.data.ConditionsRepository
 import com.golfcaddie.app.data.CourseRepository
 import com.golfcaddie.app.data.Settings
 import com.golfcaddie.app.location.gpsUpdates
+import com.golfcaddie.app.map.MapSources
+import com.golfcaddie.app.map.MapStyle
+import com.golfcaddie.app.map.OfflineMaps
+import com.golfcaddie.core.Advice
 import com.golfcaddie.core.Bag
 import com.golfcaddie.core.Caddie
 import com.golfcaddie.core.Club
 import com.golfcaddie.core.ClubRecommender
+import com.golfcaddie.core.ClubStats
+import com.golfcaddie.core.Conditions
 import com.golfcaddie.core.Course
 import com.golfcaddie.core.DistanceUnit
-import com.golfcaddie.core.GeoPoint
 import com.golfcaddie.core.Geo
-import com.golfcaddie.core.ClubStats
+import com.golfcaddie.core.GeoPoint
+import com.golfcaddie.core.HazardAdvisor
 import com.golfcaddie.core.Hole
+import com.golfcaddie.core.PlaysLike
+import com.golfcaddie.core.PlaysLikeCalculator
 import com.golfcaddie.core.Recommendation
 import com.golfcaddie.core.ShotRecord
 import com.golfcaddie.core.Simulator
@@ -32,7 +41,18 @@ import kotlinx.coroutines.launch
 import java.util.UUID
 
 /** A shot that's been started (club chosen, start spot saved) but not yet walked to the ball. */
-data class PendingShot(val club: Club, val start: GeoPoint)
+data class PendingShot(val club: Club, val start: GeoPoint, val aim: GeoPoint? = null)
+
+/** Saving the course's map images for offline use. */
+sealed interface OfflineMapStatus {
+    data object Unknown : OfflineMapStatus
+    /** No imagery with a licence that allows offline copies covers this course. */
+    data object NotAvailable : OfflineMapStatus
+    data class NotSaved(val share: Double) : OfflineMapStatus
+    data class Saving(val done: Int, val total: Int) : OfflineMapStatus
+    data object Saved : OfflineMapStatus
+    data class Failed(val reason: String) : OfflineMapStatus
+}
 
 data class UiState(
     val unit: DistanceUnit = DistanceUnit.YARDS,
@@ -53,9 +73,16 @@ data class UiState(
     /** True when the player picked the hole by hand; turns off auto-detection. */
     val holeLocked: Boolean = false,
     val situation: Situation? = null,
+    /** How far the shot to the middle of the green plays, after slope, wind and temperature. */
+    val playsLike: PlaysLike? = null,
     val recommendation: Recommendation? = null,
+    val advice: List<Advice> = emptyList(),
     val pendingShot: PendingShot? = null,
-    val satellite: Boolean = true,
+    val mapStyle: MapStyle = MapStyle.SATELLITE,
+    val liveWeather: Boolean = true,
+    val conditions: Conditions? = null,
+    val fetchingElevation: Boolean = false,
+    val offlineMap: OfflineMapStatus = OfflineMapStatus.Unknown,
 ) {
     /** The hole being shown: the one you're on, or the one picked with ◀ ▶ before there's a position. */
     val hole: Hole? get() = situation?.hole ?: course?.holes?.firstOrNull { it.id == holeId }
@@ -64,6 +91,8 @@ data class UiState(
 class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     private val courseRepo = CourseRepository(app)
     private val bagRepo = BagRepository(app)
+    private val conditionsRepo = ConditionsRepository(app)
+    private val offlineMaps = OfflineMaps(app)
     private val settings = Settings(app)
 
     private val _state = MutableStateFlow(UiState())
@@ -73,6 +102,10 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     private var lastFix: Location? = null
     /** Bumped for every course download; replies from an older, superseded one are ignored. */
     private var loadSeq = 0
+    private var weatherJob: Job? = null
+    private var lastWeatherAttemptMillis = 0L
+    private var elevationJob: Job? = null
+    private var offlineJob: Job? = null
 
     init {
         val cached = courseRepo.cachedCourses()
@@ -80,9 +113,10 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 bag = bagRepo.load(), courses = cached, course = course,
-                unit = settings.unit, satellite = settings.satellite,
+                unit = settings.unit, mapStyle = settings.mapStyle, liveWeather = settings.liveWeather,
             )
         }
+        course?.let(::prepareCourse)
     }
 
     // ---- Location -------------------------------------------------------------------------
@@ -197,7 +231,43 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     fun selectCourse(course: Course) {
         settings.courseId = course.id
         _state.update { it.copy(course = course, holeId = course.holes.firstOrNull()?.id, holeLocked = false) }
+        prepareCourse(course)
         if (_state.value.simulate) jumpToTee() else recompute()
+    }
+
+    /** Fetches what a newly chosen course still needs: its ground heights, and offline map status. */
+    private fun prepareCourse(course: Course) {
+        offlineJob?.cancel()
+        _state.update { it.copy(offlineMap = OfflineMapStatus.Unknown) }
+        offlineJob = viewModelScope.launch {
+            val source = MapSources.offlineSourceFor(course)
+            val status = if (source == null) {
+                OfflineMapStatus.NotAvailable
+            } else {
+                val share = runCatching { offlineMaps.savedShare(course, source) }.getOrDefault(0.0)
+                if (share >= 0.95) OfflineMapStatus.Saved else OfflineMapStatus.NotSaved(share)
+            }
+            _state.update { if (it.course?.id == course.id) it.copy(offlineMap = status) else it }
+        }
+        if (course.elevation != null || elevationJob?.isActive == true) return
+        elevationJob = viewModelScope.launch {
+            _state.update { it.copy(fetchingElevation = true) }
+            try {
+                val withHeights = course.copy(elevation = conditionsRepo.elevation(course))
+                courseRepo.saveCourse(withHeights)
+                _state.update { s ->
+                    s.copy(
+                        course = if (s.course?.id == course.id) withHeights else s.course,
+                        courses = s.courses.map { if (it.id == course.id) withHeights else it },
+                    )
+                }
+                recompute()
+            } catch (e: Exception) {
+                // No signal: distances still work, just without uphill/downhill until next time.
+            } finally {
+                _state.update { it.copy(fetchingElevation = false) }
+            }
+        }
     }
 
     /** Manual hole change from the ◀ ▶ buttons. */
@@ -227,24 +297,89 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { s ->
             val course = s.course
             val pos = s.position
-            if (course == null || pos == null) return@update s.copy(situation = null, recommendation = null)
-            val hole = if (s.holeLocked) currentHole(s) else Caddie.locateHole(course, pos, s.holeId)
-            if (hole == null) return@update s.copy(situation = null, recommendation = null)
+            val nothing = s.copy(situation = null, playsLike = null, recommendation = null, advice = emptyList())
+            if (course == null || pos == null) return@update nothing
+            val hole = (if (s.holeLocked) currentHole(s) else Caddie.locateHole(course, pos, s.holeId))
+                ?: return@update nothing
             val situation = Caddie.situation(course, hole, pos)
+            val conditions = s.conditions?.takeIf { s.liveWeather && it.isFresh() }
+            val plays = PlaysLikeCalculator.compute(pos, hole.greenCenter, course.elevation, conditions)
+            val rec = ClubRecommender.recommend(plays.playsMeters, s.bag, situation.onGreen)
             s.copy(
                 holeId = hole.id,
                 situation = situation,
-                recommendation = ClubRecommender.recommend(situation.targetMeters, s.bag, situation.onGreen),
+                playsLike = plays,
+                recommendation = rec,
+                advice = HazardAdvisor.advise(situation, rec, s.bag, plays.conditionFactor),
             )
+        }
+        maybeRefreshWeather()
+    }
+
+    // ---- Weather -----------------------------------------------------------------------------
+
+    private fun Conditions.isFresh() = System.currentTimeMillis() - fetchedAtMillis < WEATHER_MAX_AGE_MS
+
+    /** Fetches wind and temperature when there's none or it's over 15 minutes old. */
+    private fun maybeRefreshWeather() {
+        val s = _state.value
+        val at = s.position ?: return
+        if (!s.liveWeather || weatherJob?.isActive == true) return
+        if (s.conditions?.let { System.currentTimeMillis() - it.fetchedAtMillis < WEATHER_REFRESH_MS } == true) return
+        // After a failure (no signal), wait a couple of minutes before trying again.
+        if (System.currentTimeMillis() - lastWeatherAttemptMillis < WEATHER_RETRY_MS) return
+        lastWeatherAttemptMillis = System.currentTimeMillis()
+        weatherJob = viewModelScope.launch {
+            runCatching { conditionsRepo.weather(at) }.onSuccess { c ->
+                _state.update { it.copy(conditions = c) }
+                recompute()
+            }
+        }
+    }
+
+    fun setLiveWeather(on: Boolean) {
+        settings.liveWeather = on
+        _state.update { it.copy(liveWeather = on) }
+        lastWeatherAttemptMillis = 0
+        recompute()
+    }
+
+    // ---- Offline map ---------------------------------------------------------------------------
+
+    fun saveOfflineMap() {
+        val course = _state.value.course ?: return
+        if (_state.value.offlineMap is OfflineMapStatus.Saving) return
+        offlineJob?.cancel()
+        offlineJob = viewModelScope.launch {
+            _state.update { it.copy(offlineMap = OfflineMapStatus.Saving(0, 0)) }
+            val status = try {
+                when (val r = offlineMaps.save(course) { done, total ->
+                    _state.update { it.copy(offlineMap = OfflineMapStatus.Saving(done, total)) }
+                }) {
+                    OfflineMaps.Result.NotAvailable -> OfflineMapStatus.NotAvailable
+                    is OfflineMaps.Result.Saved ->
+                        if (r.tiles == 0) OfflineMapStatus.Failed("No imagery covers this course") else OfflineMapStatus.Saved
+                }
+            } catch (e: Exception) {
+                OfflineMapStatus.Failed(e.message ?: "Download failed")
+            }
+            _state.update { it.copy(offlineMap = status) }
         }
     }
 
     // ---- Clubs & shots ----------------------------------------------------------------------
 
-    /** Remember where you're hitting from; call [finishShot] when you reach the ball. */
+    /** Remember where you're hitting from and aiming at; call [finishShot] when you reach the ball. */
     fun startShot(club: Club) {
-        val p = _state.value.position ?: return
-        _state.update { it.copy(pendingShot = PendingShot(club, p)) }
+        val s = _state.value
+        val p = s.position ?: return
+        val aim = s.hole?.let { Caddie.aimPoint(it, p, ClubStats.of(club, s.bag.shots).typicalMeters) }
+        _state.update { it.copy(pendingShot = PendingShot(club, p, aim)) }
+    }
+
+    /** From the watch: start a shot with the club whose id is [clubId]. */
+    fun startShot(clubId: String) {
+        _state.value.bag.clubs.firstOrNull { it.id == clubId }?.let(::startShot)
     }
 
     fun finishShot() {
@@ -261,7 +396,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _state.update { it.copy(pendingShot = null) }
-        addShot(pending.club.id, meters, pending.start, end)
+        addShot(pending.club.id, meters, pending.start, end, pending.aim)
         _state.update {
             it.copy(message = "Saved ${pending.club.name}: ${formatDistance(meters, it.unit)}")
         }
@@ -269,9 +404,9 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelShot() = _state.update { it.copy(pendingShot = null) }
 
-    fun addShot(clubId: String, meters: Double, start: GeoPoint? = null, end: GeoPoint? = null) {
+    fun addShot(clubId: String, meters: Double, start: GeoPoint? = null, end: GeoPoint? = null, aim: GeoPoint? = null) {
         if (meters < ClubStats.MIN_SHOT_METERS) return
-        val shot = ShotRecord(UUID.randomUUID().toString(), clubId, meters, System.currentTimeMillis(), start, end)
+        val shot = ShotRecord(UUID.randomUUID().toString(), clubId, meters, System.currentTimeMillis(), start, end, aim)
         updateBag { it.copy(shots = it.shots + shot) }
     }
 
@@ -297,11 +432,19 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(unit = unit) }
     }
 
-    fun setSatellite(on: Boolean) {
-        settings.satellite = on
-        _state.update { it.copy(satellite = on) }
+    fun setMapStyle(style: MapStyle) {
+        settings.mapStyle = style
+        _state.update { it.copy(mapStyle = style) }
     }
+
     fun clearMessage() = _state.update { it.copy(message = null) }
+
+    private companion object {
+        const val WEATHER_REFRESH_MS = 15 * 60 * 1000L
+        /** Older than this, wind and temperature are ignored rather than trusted. */
+        const val WEATHER_MAX_AGE_MS = 60 * 60 * 1000L
+        const val WEATHER_RETRY_MS = 2 * 60 * 1000L
+    }
 }
 
 fun formatDistance(meters: Double, unit: DistanceUnit): String =

@@ -24,11 +24,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.golfcaddie.app.ui.CaddieViewModel
 import com.golfcaddie.app.ui.ClubsScreen
+import com.golfcaddie.app.ui.CourseScreen
 import com.golfcaddie.app.ui.PlayScreen
 import org.osmdroid.config.Configuration
 
@@ -39,14 +43,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // osmdroid: identify the app to the free tile servers and cache tiles in app storage.
+        // osmdroid: identify the app to the tile servers and keep map images in app storage.
         Configuration.getInstance().apply {
             userAgentValue = packageName
             osmdroidBasePath = filesDir
-            osmdroidTileCache = cacheDir.resolve("tiles")
+            // In app files, not the cache folder: Android may empty the cache when storage runs
+            // low, which would delete map images saved for offline use.
+            osmdroidTileCache = filesDir.resolve("tiles").apply { mkdirs() }
         }
         // Keep the screen on while playing.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Mirror distances to a paired Wear OS watch while the app is open.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) { WatchLink(this@MainActivity, vm).start(this) }
+        }
 
         setContent {
             MaterialTheme {
@@ -80,13 +90,15 @@ class MainActivity : ComponentActivity() {
                         NavigationBar {
                             NavigationBarItem(tab == 0, { tab = 0 }, icon = { Text("⛳") }, label = { Text("Play") })
                             NavigationBarItem(tab == 1, { tab = 1 }, icon = { Text("🏌") }, label = { Text("Clubs") })
+                            NavigationBarItem(tab == 2, { tab = 2 }, icon = { Text("🗺") }, label = { Text("Course") })
                         }
                     },
                 ) { padding ->
                     Box(Modifier.padding(padding)) {
                         when (tab) {
-                            0 -> PlayScreen(state, vm)
-                            else -> ClubsScreen(state, vm)
+                            0 -> PlayScreen(state, vm, onOpenCourse = { tab = 2 })
+                            1 -> ClubsScreen(state, vm)
+                            else -> CourseScreen(state, vm, onCoursePicked = { tab = 0 })
                         }
                     }
                 }

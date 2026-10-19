@@ -11,6 +11,12 @@ data class Course(
     /** In playing order; a 27-hole club comes out as loops, e.g. 1-18 then the other 1-9. */
     val holes: List<Hole>,
     val hazards: List<Hazard>,
+    /** Fairway outlines, for the offline course plan. */
+    val fairways: List<List<GeoPoint>> = emptyList(),
+    /** Trees and woods on or beside the course, for the offline course plan. */
+    val woods: List<List<GeoPoint>> = emptyList(),
+    /** Ground heights for uphill/downhill; fetched separately after the course loads. */
+    val elevation: ElevationGrid? = null,
 ) {
     fun contains(p: GeoPoint): Boolean = areas.any { Geo.contains(it, p) }
 

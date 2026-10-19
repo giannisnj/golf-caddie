@@ -7,7 +7,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
@@ -17,6 +20,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Switch
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -34,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.golfcaddie.core.Advice
 import com.golfcaddie.core.ClubType
 import com.golfcaddie.core.DistanceUnit
 import com.golfcaddie.core.Geo
@@ -42,8 +48,7 @@ import com.golfcaddie.core.Recommendation
 import com.golfcaddie.core.StatSource
 
 @Composable
-fun PlayScreen(state: UiState, vm: CaddieViewModel) {
-    var showCourses by remember { mutableStateOf(false) }
+fun PlayScreen(state: UiState, vm: CaddieViewModel, onOpenCourse: () -> Unit) {
     val u = state.unit
     fun d(m: Double) = formatDistance(m, u)
 
@@ -53,7 +58,7 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = { showCourses = true }, modifier = Modifier.weight(1f)) {
+            TextButton(onClick = onOpenCourse, modifier = Modifier.weight(1f)) {
                 Text(state.course?.name ?: "Choose a course", maxLines = 1)
             }
             if (state.course != null) {
@@ -71,7 +76,8 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
 
         Row(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FilterChip(state.simulate, { vm.setSimulate(!state.simulate) }, label = { Text("Simulate GPS") })
-            FilterChip(state.satellite, { vm.setSatellite(!state.satellite) }, label = { Text("Satellite") })
+            // Cycles Satellite → Street → Course plan (the plan works with no signal).
+            FilterChip(true, { vm.setMapStyle(state.mapStyle.next) }, label = { Text(state.mapStyle.label) })
             FilterChip(u == DistanceUnit.YARDS, {
                 vm.setUnit(if (u == DistanceUnit.YARDS) DistanceUnit.METERS else DistanceUnit.YARDS)
             }, label = { Text(u.label) })
@@ -81,7 +87,7 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
             course = state.course,
             hole = state.hole,
             player = state.position,
-            satellite = state.satellite,
+            style = state.mapStyle,
             onTap = vm::onMapTap,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 4.dp),
         )
@@ -108,16 +114,16 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
             text = { Text(it) },
         )
     }
-    if (showCourses) CourseDialog(state, vm) { showCourses = false }
 }
 
 @Composable
 private fun InfoPanel(state: UiState, vm: CaddieViewModel, d: (Double) -> String) {
     Card(Modifier.fillMaxWidth().padding(8.dp)) {
-        Column(Modifier.padding(12.dp)) {
+        // Scrolls rather than squeezing the map when there's a lot to say.
+        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).padding(12.dp)) {
             val s = state.situation
             when {
-                state.course == null -> Text("Load a course: tap \"Choose a course\" above.")
+                state.course == null -> Text("Load a course in the Course tab.")
                 state.position == null -> Text(
                     when {
                         state.simulate -> "Tap the map to place yourself."
@@ -137,6 +143,12 @@ private fun InfoPanel(state: UiState, vm: CaddieViewModel, d: (Double) -> String
                         Text("to the middle of the green")
                     }
                     Text("Front ${d(s.green.front)}  ·  Back ${d(s.green.back)}")
+                    state.playsLike?.let { p ->
+                        CaddieText.playsLike(p, state.unit)?.let {
+                            Text(it, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text(CaddieText.playsLikeWhy(p, state.unit), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     // An OSM flag is where it stood on mapping day, so it's shown but not planned on.
                     s.green.pin?.let {
                         Text("Mapped flag ${d(it)} (may have moved)", style = MaterialTheme.typography.bodySmall)
@@ -147,14 +159,22 @@ private fun InfoPanel(state: UiState, vm: CaddieViewModel, d: (Double) -> String
                             HazardType.WATER -> "Water"
                             HazardType.LATERAL_WATER -> "Lateral water"
                         }
-                        Text("$name: reach ${d(hz.reachMeters)}, carry ${d(hz.carryMeters)}",
+                        Text("$name${CaddieText.sideOf(hz)}: reach ${d(hz.reachMeters)}, carry ${d(hz.carryMeters)}",
                             style = MaterialTheme.typography.bodySmall)
                     }
                     if (s.offLineMeters > 60) {
                         Text("You're ${d(s.offLineMeters)} off this hole's line. Wrong hole? Use ◀ ▶.",
                             style = MaterialTheme.typography.bodySmall)
                     }
-                    state.recommendation?.let { RecommendationView(it, d) }
+                    state.recommendation?.let { RecommendationView(it, state.unit, d) }
+                    state.advice.forEach { a ->
+                        val warning = a is Advice.InPlay
+                        Text(
+                            (if (warning) "⚠ " else "→ ") + CaddieText.advice(a, state.unit),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (warning) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                 }
             }
             state.accuracyMeters?.let {
@@ -166,7 +186,7 @@ private fun InfoPanel(state: UiState, vm: CaddieViewModel, d: (Double) -> String
 }
 
 @Composable
-private fun RecommendationView(rec: Recommendation, d: (Double) -> String) {
+private fun RecommendationView(rec: Recommendation, unit: DistanceUnit, d: (Double) -> String) {
     val pick = rec.club ?: return
     Spacer(Modifier.padding(top = 6.dp))
     val headline = when (rec.kind) {
@@ -177,12 +197,14 @@ private fun RecommendationView(rec: Recommendation, d: (Double) -> String) {
     }
     Text(headline, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
     if (rec.kind != Recommendation.Kind.PUTT) {
+        val range = CaddieText.range(pick, unit)
         val basis = when (pick.source) {
-            StatSource.HISTORY -> "you average ${d(pick.typicalMeters)} over ${pick.shotCount} shots"
-            StatSource.MAX_ONLY -> "~${d(pick.typicalMeters)}, from your max of ${d(pick.maxMeters ?: 0.0)}"
-            StatSource.DEFAULT -> "~${d(pick.typicalMeters)} (typical golfer; add your own data in Clubs)"
+            StatSource.HISTORY -> "You hit it $range (avg ${d(pick.typicalMeters)}, ${pick.shotCount} shots)"
+            StatSource.MAX_ONLY -> "About ${d(pick.typicalMeters)} from your max of ${d(pick.maxMeters ?: 0.0)}; usually $range"
+            StatSource.DEFAULT -> "About ${d(pick.typicalMeters)} for a typical golfer ($range). Add your shots in Clubs."
         }
         Text(basis, style = MaterialTheme.typography.bodySmall)
+        CaddieText.side(pick, unit)?.let { Text("Your ${pick.club.name} $it", style = MaterialTheme.typography.bodySmall) }
         rec.shorterOption?.let {
             Text("Or ${it.club.name} if you catch it well (max ${d(it.maxMeters ?: 0.0)})",
                 style = MaterialTheme.typography.bodySmall)
@@ -222,40 +244,4 @@ private fun ShotTracker(state: UiState, vm: CaddieViewModel, d: (Double) -> Stri
             },
         )
     }
-}
-
-@Composable
-private fun CourseDialog(state: UiState, vm: CaddieViewModel, onDismiss: () -> Unit) {
-    var query by rememberSaveable { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-        title = { Text("Golf course") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = vm::findCoursesNearMe, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
-                    Text("Courses near me")
-                }
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text("Course name or town") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { vm.searchCourses(query) }),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedButton(onClick = { vm.searchCourses(query) }, enabled = !state.loading) { Text("Search") }
-                if (state.loading) CircularProgressIndicator()
-                LazyColumn {
-                    items(state.courses, key = { it.id }) { c ->
-                        TextButton(onClick = { vm.selectCourse(c); onDismiss() }) {
-                            Text("${c.name} (${c.holes.size} holes)")
-                        }
-                    }
-                }
-                Text("Course maps © OpenStreetMap contributors", style = MaterialTheme.typography.labelSmall)
-            }
-        },
-    )
 }

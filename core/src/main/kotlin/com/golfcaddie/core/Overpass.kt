@@ -28,7 +28,8 @@ object Overpass {
 
     /**
      * Overpass QL for the golf features the app uses within [radiusMeters] of a point.
-     * Fairways, rough and cart paths are left out: they're most of the data and aren't used.
+     * Rough and cart paths are left out: they're a lot of data and aren't used. Fairways and
+     * woods are kept for the offline course plan.
      * Lakes mapped as multipolygons are included; rivers are not (they can be huge).
      */
     fun queryAround(center: GeoPoint, radiusMeters: Int = 2500): String {
@@ -38,11 +39,13 @@ object Overpass {
             (
               way["leisure"="golf_course"]$around;
               relation["leisure"="golf_course"]$around;
-              way["golf"~"^(hole|green|tee|bunker|water_hazard|lateral_water_hazard)$"]$around;
+              way["golf"~"^(hole|green|tee|fairway|bunker|water_hazard|lateral_water_hazard)$"]$around;
               relation["golf"~"^(green|bunker|water_hazard|lateral_water_hazard)$"]$around;
               node["golf"="pin"]$around;
               way["natural"="water"]$around;
               relation["natural"="water"]["water"!~"^(river|canal|stream)$"]$around;
+              way["natural"="wood"]$around;
+              way["landuse"="forest"]$around;
             );
             out geom;
         """.trimIndent()
@@ -95,11 +98,16 @@ object Overpass {
             if (type != null && f.firstRing.size >= 3) Hazard(type, f.firstRing) else null
         }
 
+        val fairways = features.filter { it.tags["golf"] == "fairway" && it.firstRing.size >= 3 }.map { it.firstRing }
+        val woods = features.filter {
+            (it.tags["natural"] == "wood" || it.tags["landuse"] == "forest") && it.firstRing.size >= 3
+        }.map { it.firstRing }
+
         val holes = holeWays.mapIndexed { index, f -> buildHole(f, index, greens, tees, pins) }
 
         val courses = if (courseAreas.isEmpty()) {
             if (holes.isEmpty()) emptyList()
-            else listOf(Course(0, "Golf course", emptyList(), playingOrder(holes), hazards))
+            else listOf(Course(0, "Golf course", emptyList(), playingOrder(holes), hazards, fairways, nearHoles(woods, holes)))
         } else {
             // Clubs are often mapped twice (clubhouse way + multipolygon); bigger areas claim holes first.
             val areas = courseAreas.sortedByDescending { a -> a.rings.sumOf { it.size } }
@@ -140,10 +148,12 @@ object Overpass {
                             rings.any { Geo.contains(it, p) } || courseHoles.any { Geo.distanceToPolyline(p, it.line) < 60.0 }
                         }
                     },
+                    fairways = fairways.filter { f -> courseHoles.any { h -> Geo.contains(f, h.line[h.line.size / 2]) || f.any { Geo.distanceToPolyline(it, h.line) < 40.0 } } },
+                    woods = nearHoles(woods, courseHoles),
                 )
             }.filter { it.holes.isNotEmpty() } +
                 listOfNotNull(unclaimed.takeIf { it.isNotEmpty() }?.let {
-                    Course(-1, "Golf course", emptyList(), playingOrder(it), hazards)
+                    Course(-1, "Golf course", emptyList(), playingOrder(it), hazards, fairways, nearHoles(woods, it))
                 })
         }
 
@@ -151,6 +161,10 @@ object Overpass {
             if (c.contains(near)) 0.0 else Geo.distance(near, c.center)
         }
     }
+
+    /** Areas with a vertex within 80 m of a hole line: tree lines beside fairways, not a park across town. */
+    private fun nearHoles(areas: List<List<GeoPoint>>, holes: List<Hole>): List<List<GeoPoint>> =
+        areas.filter { a -> a.any { p -> holes.any { Geo.distanceToPolyline(p, it.line) < 80.0 } } }
 
     /**
      * Orders holes the way they're played. With unique numbers that's just 1..18. Clubs with

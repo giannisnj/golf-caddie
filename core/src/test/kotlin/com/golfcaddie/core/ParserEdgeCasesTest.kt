@@ -107,6 +107,8 @@ class ParserEdgeCasesTest {
         val water = Caddie.situation(course, course.holes.single(), p(0.0, 0.0)).hazards.single()
         assertEquals(HazardType.WATER, water.type)
         assertTrue(water.carryMeters >= 300.0)
+        assertEquals(false, water.onLine)
+        assertEquals(1, water.side, "the lake is on the right as you face the green")
     }
 
     @Test

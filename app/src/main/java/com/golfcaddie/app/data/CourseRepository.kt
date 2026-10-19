@@ -13,8 +13,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 
 /**
@@ -23,7 +21,7 @@ import java.net.URLEncoder
  */
 class CourseRepository(context: Context) {
     private val cacheFile = File(context.filesDir, "courses.json")
-    private val userAgent = "GolfCaddie/0.1 (Android; ${context.packageName})"
+    private val http = Http("GolfCaddie/0.1 (Android; ${context.packageName})")
     private val json = Json { ignoreUnknownKeys = true }
     private val listSerializer = ListSerializer(Course.serializer())
 
@@ -31,14 +29,25 @@ class CourseRepository(context: Context) {
         json.decodeFromString(listSerializer, cacheFile.readText())
     }.getOrDefault(emptyList())
 
+    /** Replaces [course] in the offline cache (e.g. once its elevation grid has been fetched). */
+    fun saveCourse(course: Course) {
+        val all = cachedCourses()
+        val updated = if (all.any { it.id == course.id }) all.map { if (it.id == course.id) course else it } else all + course
+        cacheFile.writeText(json.encodeToString(listSerializer, updated))
+    }
+
     /** All golf courses within [radiusMeters] of [center], nearest first. */
     suspend fun coursesNear(center: GeoPoint, radiusMeters: Int = 3000): List<Course> = withContext(Dispatchers.IO) {
         val query = Overpass.queryAround(center, radiusMeters)
         var lastError: Exception? = null
         for (endpoint in Overpass.ENDPOINTS) {
             try {
-                val body = post(endpoint, "data=" + URLEncoder.encode(query, "UTF-8"))
-                val courses = Overpass.parse(body, near = center)
+                val body = http.post(endpoint, "data=" + URLEncoder.encode(query, "UTF-8"))
+                // Keep elevation grids already fetched for the same courses.
+                val previous = cachedCourses().associateBy { it.id }
+                val courses = Overpass.parse(body, near = center).map { c ->
+                    previous[c.id]?.elevation?.let { c.copy(elevation = it) } ?: c
+                }
                 if (courses.isNotEmpty()) cacheFile.writeText(json.encodeToString(listSerializer, courses))
                 return@withContext courses
             } catch (e: Exception) {
@@ -52,44 +61,12 @@ class CourseRepository(context: Context) {
     suspend fun geocode(name: String): GeoPoint? = withContext(Dispatchers.IO) {
         val url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" +
             URLEncoder.encode(name, "UTF-8")
-        val results = json.parseToJsonElement(get(url)).jsonArray
+        val results = json.parseToJsonElement(http.get(url)).jsonArray
         results.firstOrNull()?.jsonObject?.let {
             GeoPoint(
                 it["lat"]!!.jsonPrimitive.content.toDouble(),
                 it["lon"]!!.jsonPrimitive.content.toDouble(),
             )
         }
-    }
-
-    private fun get(url: String): String = open(url).run {
-        try {
-            requireOk(responseCode)
-            inputStream.bufferedReader().readText()
-        } finally {
-            disconnect()
-        }
-    }
-
-    private fun post(url: String, form: String): String = open(url).run {
-        try {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            outputStream.use { it.write(form.toByteArray()) }
-            requireOk(responseCode)
-            inputStream.bufferedReader().readText()
-        } finally {
-            disconnect()
-        }
-    }
-
-    private fun open(url: String) = (URL(url).openConnection() as HttpURLConnection).apply {
-        connectTimeout = 15_000
-        readTimeout = 90_000
-        setRequestProperty("User-Agent", userAgent)
-    }
-
-    private fun HttpURLConnection.requireOk(code: Int) {
-        if (code !in 200..299) throw IOException("HTTP $code from ${url.host}")
     }
 }

@@ -133,6 +133,30 @@ object Geo {
     fun length(line: List<GeoPoint>): Double =
         line.zipWithNext().sumOf { (a, b) -> distance(a, b) }
 
+    /** How far along [line] (meters from its start) the point nearest [p] lies. */
+    fun alongPolyline(p: GeoPoint, line: List<GeoPoint>): Double {
+        var best = Double.POSITIVE_INFINITY
+        var bestAlong = 0.0
+        var walked = 0.0
+        for ((a, b) in line.zipWithNext()) {
+            val (ax, ay) = toLocal(p, a)
+            val (bx, by) = toLocal(p, b)
+            val dx = bx - ax
+            val dy = by - ay
+            val len2 = dx * dx + dy * dy
+            val t = if (len2 == 0.0) 0.0 else (-(ax * dx + ay * dy) / len2).coerceIn(0.0, 1.0)
+            val cx = ax + t * dx
+            val cy = ay + t * dy
+            val d = sqrt(cx * cx + cy * cy)
+            if (d < best) {
+                best = d
+                bestAlong = walked + t * sqrt(len2)
+            }
+            walked += sqrt(len2)
+        }
+        return bestAlong
+    }
+
     /** Point [meters] along a polyline from its start (clamped to the ends). */
     fun pointAlong(line: List<GeoPoint>, meters: Double): GeoPoint {
         require(line.isNotEmpty())

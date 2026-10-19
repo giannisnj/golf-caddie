@@ -69,6 +69,10 @@ dependencies {
     // Free OpenStreetMap map view: no Google Maps API key needed.
     implementation("org.osmdroid:osmdroid-android:6.1.20")
 
+    // Talking to the Wear OS watch app. Only used when Google Play services is on the phone.
+    implementation("com.google.android.gms:play-services-wearable:18.2.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+
     // Runs the real app on the JVM (no emulator) and takes screenshots.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")

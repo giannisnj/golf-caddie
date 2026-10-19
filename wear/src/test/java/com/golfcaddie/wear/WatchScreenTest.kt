@@ -1,0 +1,84 @@
+package com.golfcaddie.wear
+
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
+import com.github.takahirom.roborazzi.captureRoboImage
+import com.golfcaddie.core.WatchClub
+import com.golfcaddie.core.WatchState
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+
+/** The watch app's screen on a simulated round Wear OS watch. Screenshots: wear/build/screenshots/. */
+@RunWith(RobolectricTestRunner::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [34], qualifiers = "w227dp-h227dp-small-notlong-round-watch-xhdpi-keyshidden-nonav")
+class WatchScreenTest {
+    @get:Rule
+    val compose = createComposeRule()
+
+    /** Scrolls the watch's list to [text] (only what's on screen exists), then returns it. */
+    private fun scrollTo(text: String) = compose.onNode(hasScrollAction()).performScrollToNode(hasText(text)).let {
+        compose.onNodeWithText(text)
+    }
+
+    private val onHole7 = WatchState(
+        hole = "Hole 7 · Par 3",
+        front = "112", center = "134", back = "157", unit = "yd",
+        playsLike = "Plays 141 yd",
+        club = "7 Iron", clubRange = "136–154 yd",
+        warning = "Bunker 138–148 right: about 2 times in 10",
+        clubs = listOf(WatchClub("6i", "6 Iron"), WatchClub("7i", "7 Iron"), WatchClub("8i", "8 Iron")),
+        recommendedClubId = "7i",
+    )
+
+    @Test
+    fun showsDistancesAndTheClub() {
+        compose.setContent { WatchScreen(onHole7, {}, {}, {}) }
+        compose.onNodeWithText("134").assertExists()
+        compose.onNodeWithText("F 112 · B 157").assertExists()
+        compose.onNodeWithText("Plays 141 yd").assertExists()
+        compose.onNodeWithText("7 Iron").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/watch_1_distances.png")
+    }
+
+    @Test
+    fun hittingSendsTheRecommendedClubOrAnotherOne() {
+        val started = mutableListOf<String>()
+        compose.setContent { WatchScreen(onHole7, { started += it }, {}, {}) }
+        scrollTo("Hit 7 Iron").performClick()
+        scrollTo("Other club").performClick()
+        scrollTo("8 Iron").performClick()
+        assertEquals(listOf("7i", "8i"), started)
+    }
+
+    @Test
+    fun duringAShotTheWatchFinishesOrCancelsIt() {
+        var finished = 0
+        var cancelled = 0
+        val walking = onHole7.copy(shotInProgress = "7 Iron · 96 yd so far")
+        compose.setContent { WatchScreen(walking, {}, { finished++ }, { cancelled++ }) }
+        scrollTo("7 Iron · 96 yd so far").assertExists()
+        scrollTo("Ball is here").performClick()
+        scrollTo("Cancel").performClick()
+        assertEquals(1, finished)
+        assertEquals(1, cancelled)
+        compose.onRoot().captureRoboImage("build/screenshots/watch_2_shot.png")
+    }
+
+    @Test
+    fun withoutDataItSaysWhatToDo() {
+        compose.setContent { WatchScreen(WatchState(status = "Waiting for GPS…"), {}, {}, {}) }
+        compose.onNodeWithText("Waiting for GPS…").assertExists()
+        compose.onRoot().captureRoboImage("build/screenshots/watch_3_waiting.png")
+    }
+}

@@ -28,4 +28,6 @@ include(":core")
 // Pass -PcoreOnly to build/test the core without the Android SDK.
 if (!providers.gradleProperty("coreOnly").isPresent) {
     include(":app")
+    // Wear OS watch app: shows the phone's distances and club, and can start/finish shots.
+    include(":wear")
 }

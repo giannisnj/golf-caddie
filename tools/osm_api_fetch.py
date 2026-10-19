@@ -40,7 +40,8 @@ def find_course(name):
 
 
 def wanted(tags):
-    return "golf" in tags or tags.get("leisure") == "golf_course" or tags.get("natural") == "water"
+    return ("golf" in tags or tags.get("leisure") == "golf_course"
+            or tags.get("natural") in ("water", "wood") or tags.get("landuse") == "forest")
 
 
 def to_overpass(osm_xml):

@@ -4,7 +4,19 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 @Serializable
-enum class ClubType { DRIVER, WOOD, HYBRID, IRON, WEDGE, PUTTER }
+enum class ClubType(
+    /** Carry as a share of total distance (carry + roll). Rules of thumb; longer clubs roll more. */
+    val carryFraction: Double,
+    /** Typical spread either side of a club's normal distance until you've recorded enough shots. */
+    val defaultSpreadFraction: Double,
+) {
+    DRIVER(0.86, 0.08),
+    WOOD(0.88, 0.08),
+    HYBRID(0.90, 0.07),
+    IRON(0.93, 0.06),
+    WEDGE(0.95, 0.06),
+    PUTTER(1.0, 0.0),
+}
 
 @Serializable
 data class Club(
@@ -27,7 +39,20 @@ data class ShotRecord(
     /** Set when the shot was measured by walking it with GPS. */
     val start: GeoPoint? = null,
     val end: GeoPoint? = null,
-)
+    /** Where you were aiming when you started the shot, for left/right tendency. */
+    val aim: GeoPoint? = null,
+) {
+    /** Meters right (+) or left (-) of the aim line where the ball finished, when known. */
+    val sideMeters: Double?
+        get() {
+            if (start == null || end == null || aim == null) return null
+            val (ax, ay) = Geo.toLocal(start, aim)
+            val len = kotlin.math.sqrt(ax * ax + ay * ay)
+            if (len < 1.0) return null
+            val (ex, ey) = Geo.toLocal(start, end)
+            return (ex * ay - ey * ax) / len
+        }
+}
 
 @Serializable
 data class Bag(val clubs: List<Club>, val shots: List<ShotRecord> = emptyList()) {
@@ -78,7 +103,25 @@ data class ClubStats(
     /** The distance the recommender plans around: what this club normally goes for you. */
     val typicalMeters: Double,
     val source: StatSource,
+    /** Your usual range: most shots (about 6 in 10) finish between these. */
+    val lowMeters: Double = typicalMeters,
+    val highMeters: Double = typicalMeters,
+    /** True when the range comes from your shots; otherwise it's a typical spread for the club type. */
+    val rangeFromShots: Boolean = false,
+    /** Average finish right (+) or left (-) of where you aimed, from GPS-walked shots. */
+    val sideMeters: Double? = null,
+    val sideShots: Int = 0,
 ) {
+    /**
+     * Spread as a standard deviation. The usual range is the 20th to 80th percentile, which on
+     * a bell curve spans 1.68 standard deviations.
+     */
+    val sdMeters: Double get() = ((highMeters - lowMeters) / 1.683).coerceAtLeast(1.0)
+
+    /** Chance a full swing finishes (total distance) shorter than [meters], with distances scaled by [factor]. */
+    fun chanceShorterThan(meters: Double, factor: Double = 1.0): Double =
+        Stats.normalCdf((meters - typicalMeters * factor) / (sdMeters * factor))
+
     companion object {
         const val MIN_SHOTS = 3
         /** Most shots fall short of a personal best; a full swing typically travels ~95% of max. */
@@ -89,26 +132,56 @@ data class ClubStats(
         const val MISHIT_FRACTION = 0.75
         /** Anything shorter is a mis-tap or GPS noise, not a full shot with this club. */
         const val MIN_SHOT_METERS = 10.0
+        /** Solid shots needed before the range comes from your own shots. */
+        const val MIN_RANGE_SHOTS = 5
+        /** GPS-walked shots with an aim needed before showing a left/right tendency. */
+        const val MIN_SIDE_SHOTS = 3
 
         fun of(club: Club, allShots: List<ShotRecord>): ClubStats {
-            val shots = allShots.filter { it.clubId == club.id && it.distanceMeters >= MIN_SHOT_METERS }
+            val recent = allShots.filter { it.clubId == club.id && it.distanceMeters >= MIN_SHOT_METERS }
                 .sortedByDescending { it.timestampMillis }
                 .take(RECENT_SHOTS)
-                .map { it.distanceMeters }
+            val shots = recent.map { it.distanceMeters }
             val shotMax = shots.maxOrNull()
             val max = listOfNotNull(shotMax, club.manualMaxMeters?.takeIf { it >= MIN_SHOT_METERS }).maxOrNull()
 
-            if (shots.size >= MIN_SHOTS) {
-                val median = shots.sorted()[shots.size / 2]
-                val solid = shots.filter { it >= median * MISHIT_FRACTION }
-                val avg = solid.average()
-                return ClubStats(club, shots.size, max, avg, avg, StatSource.HISTORY)
+            val median = shots.sorted().getOrNull(shots.size / 2)
+            val solidShots = recent.filter { median == null || it.distanceMeters >= median * MISHIT_FRACTION }
+            val sides = solidShots.mapNotNull { it.sideMeters }
+            val side = sides.takeIf { it.size >= MIN_SIDE_SHOTS }?.average()
+
+            val base = when {
+                shots.size >= MIN_SHOTS -> {
+                    val avg = solidShots.map { it.distanceMeters }.average()
+                    ClubStats(club, shots.size, max, avg, avg, StatSource.HISTORY)
+                }
+                max != null -> ClubStats(
+                    club, shots.size, max, shots.takeIf { it.isNotEmpty() }?.average(),
+                    max * TYPICAL_FRACTION_OF_MAX, StatSource.MAX_ONLY,
+                )
+                else -> ClubStats(club, 0, null, null, club.defaultMeters, StatSource.DEFAULT)
             }
-            if (max != null) {
-                return ClubStats(club, shots.size, max, shots.takeIf { it.isNotEmpty() }?.average(),
-                    max * TYPICAL_FRACTION_OF_MAX, StatSource.MAX_ONLY)
+            val solid = solidShots.map { it.distanceMeters }.sorted()
+            return if (solid.size >= MIN_RANGE_SHOTS) {
+                base.copy(
+                    lowMeters = percentile(solid, 0.2), highMeters = percentile(solid, 0.8),
+                    rangeFromShots = true, sideMeters = side, sideShots = sides.size,
+                )
+            } else {
+                val spread = base.typicalMeters * club.type.defaultSpreadFraction
+                base.copy(
+                    lowMeters = base.typicalMeters - spread, highMeters = base.typicalMeters + spread,
+                    sideMeters = side, sideShots = sides.size,
+                )
             }
-            return ClubStats(club, 0, null, null, club.defaultMeters, StatSource.DEFAULT)
+        }
+
+        /** Linear-interpolated percentile of an ascending list. */
+        internal fun percentile(sorted: List<Double>, q: Double): Double {
+            val pos = q * (sorted.size - 1)
+            val i = pos.toInt()
+            val frac = pos - i
+            return if (i + 1 < sorted.size) sorted[i] * (1 - frac) + sorted[i + 1] * frac else sorted[i]
         }
     }
 }
@@ -162,5 +235,16 @@ object ClubRecommender {
             Recommendation.Kind.FULL_SWING
         }
         return Recommendation(targetMeters, pick, shorter, longer, kind)
+    }
+}
+
+internal object Stats {
+    /** Standard normal CDF (Abramowitz & Stegun 7.1.26, error < 1.5e-7). */
+    fun normalCdf(z: Double): Double {
+        val x = kotlin.math.abs(z) / kotlin.math.sqrt(2.0)
+        val t = 1.0 / (1.0 + 0.3275911 * x)
+        val erf = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+            t * kotlin.math.exp(-x * x)
+        return if (z >= 0) 0.5 * (1 + erf) else 0.5 * (1 - erf)
     }
 }

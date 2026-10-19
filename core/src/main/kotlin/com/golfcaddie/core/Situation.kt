@@ -18,6 +18,10 @@ data class HazardOnLine(
     val reachMeters: Double,
     /** Distance to the far edge (what you must carry). */
     val carryMeters: Double,
+    /** True when it sits across the line to the green; false when it's beside the line. */
+    val onLine: Boolean = true,
+    /** For a hazard beside the line: -1 left, +1 right (as you face the green); 0 across it. */
+    val side: Int = 0,
 )
 
 data class Situation(
@@ -79,6 +83,17 @@ object Caddie {
     }
 
     /**
+     * Where a shot with a club that goes [clubMeters] is aimed: the green if it's in range,
+     * otherwise the point that far down the hole's line (so a dogleg tee shot aims at the
+     * fairway, not across the trees at the green).
+     */
+    fun aimPoint(hole: Hole, player: GeoPoint, clubMeters: Double): GeoPoint {
+        if (Geo.distance(player, hole.greenCenter) <= clubMeters * 1.1) return hole.greenCenter
+        val along = Geo.alongPolyline(player, hole.line)
+        return Geo.pointAlong(hole.line, along + clubMeters)
+    }
+
+    /**
      * Hazards the ball would fly over or into on a straight line to the green,
      * nearest first. A corridor of [corridorMeters] either side is considered.
      */
@@ -103,13 +118,22 @@ object Caddie {
             // Clip every edge to the corridor ahead (not just its corners, so a long straight
             // shoreline running beside the shot still counts).
             val alongs = mutableListOf<Double>()
+            var crossesLine = false
             for (i in pts.indices) {
                 val (a1, c1) = pts[i]
                 val (a2, c2) = pts[(i + 1) % pts.size]
                 clipToBox(a1, c1, a2, c2, 0.0, limit, -corridorMeters, corridorMeters)?.let { alongs += it }
+                if (clipToBox(a1, c1, a2, c2, 0.0, limit, -1.5, 1.5) != null) crossesLine = true
             }
-            if (alongs.isEmpty() || alongs.max() <= MIN_HAZARD_CARRY_M) null
-            else HazardOnLine(hz.type, alongs.min(), alongs.max())
+            if (alongs.isEmpty() || alongs.max() <= MIN_HAZARD_CARRY_M) return@mapNotNull null
+            // Cross-track is positive to the left of the line (east of a northward shot is negative).
+            val (cx, cy) = Geo.toLocal(player, Geo.centroid(hz.polygon))
+            val side = when {
+                crossesLine -> 0
+                -cx * uy + cy * ux > 0 -> -1
+                else -> 1
+            }
+            HazardOnLine(hz.type, alongs.min(), alongs.max(), crossesLine, side)
         }.sortedBy { it.reachMeters }
     }
 

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -21,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +33,7 @@ import com.golfcaddie.core.ClubStats
 import com.golfcaddie.core.ClubType
 import com.golfcaddie.core.DistanceUnit
 import com.golfcaddie.core.StatSource
+import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
@@ -40,7 +43,21 @@ fun ClubsScreen(state: UiState, vm: CaddieViewModel) {
     val u = state.unit
     fun d(m: Double) = formatDistance(m, u)
 
-    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val clubs = state.bag.clubs.filter { it.type != ClubType.PUTTER }
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp), state = listState) {
+        item {
+            GappingChart(
+                stats = clubs.filter { it.inBag }.map { ClubStats.of(it, state.bag.shots) },
+                unit = u,
+                onClubTap = { id ->
+                    // Tapping a bar opens that club's card (the numbers behind the chart).
+                    expanded = id
+                    scope.launch { listState.animateScrollToItem(2 + clubs.indexOfFirst { it.id == id }) }
+                },
+            )
+        }
         item {
             Text(
                 "Your distances. The caddie plans around your typical distance: the average of your " +
@@ -50,7 +67,7 @@ fun ClubsScreen(state: UiState, vm: CaddieViewModel) {
                 modifier = Modifier.padding(8.dp),
             )
         }
-        items(state.bag.clubs.filter { it.type != ClubType.PUTTER }, key = { it.id }) { club ->
+        items(clubs, key = { it.id }) { club ->
             val stats = ClubStats.of(club, state.bag.shots)
             val open = expanded == club.id
             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = if (open) null else club.id }) {
@@ -66,6 +83,9 @@ fun ClubsScreen(state: UiState, vm: CaddieViewModel) {
                             }
                             Text("Typical ${d(stats.typicalMeters)} · Max ${stats.maxMeters?.let(::d) ?: "–"} · $src",
                                 style = MaterialTheme.typography.bodySmall)
+                            val range = CaddieText.range(stats, u) + if (stats.rangeFromShots) "" else " (estimate)"
+                            val side = CaddieText.side(stats, u)?.let { " · $it" } ?: ""
+                            Text("Usually $range$side", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     if (open) ClubEditor(state, vm, club.id, ::d)
@@ -133,7 +153,11 @@ private fun ClubEditor(state: UiState, vm: CaddieViewModel, clubId: String, d: (
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "${d(shot.distanceMeters)}  ·  ${fmt.format(Date(shot.timestampMillis))}" +
-                        if (shot.start != null) "  ·  GPS" else "",
+                        (if (shot.start != null) "  ·  GPS" else "") +
+                        (shot.sideMeters?.let { side ->
+                            val n = Math.round(u.fromMeters(kotlin.math.abs(side)))
+                            if (n < 1) "  ·  on line" else "  ·  $n ${u.label} ${if (side > 0) "right" else "left"}"
+                        } ?: ""),
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.bodySmall,
                 )
