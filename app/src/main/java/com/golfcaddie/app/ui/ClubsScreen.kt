@@ -1,0 +1,128 @@
+package com.golfcaddie.app.ui
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import com.golfcaddie.core.ClubStats
+import com.golfcaddie.core.ClubType
+import com.golfcaddie.core.StatSource
+import java.text.DateFormat
+import java.util.Date
+
+@Composable
+fun ClubsScreen(state: UiState, vm: CaddieViewModel) {
+    var expanded by remember { mutableStateOf<String?>(null) }
+    val u = state.unit
+    fun d(m: Double) = formatDistance(m, u)
+
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+        item {
+            Text(
+                "Your distances. The caddie plans around your typical distance: the average of your " +
+                    "recent shots (mishits ignored) once you have ${ClubStats.MIN_SHOTS}, otherwise " +
+                    "${(ClubStats.TYPICAL_FRACTION_OF_MAX * 100).toInt()}% of your max.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(8.dp),
+            )
+        }
+        items(state.bag.clubs.filter { it.type != ClubType.PUTTER }, key = { it.id }) { club ->
+            val stats = ClubStats.of(club, state.bag.shots)
+            val open = expanded == club.id
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = if (open) null else club.id }) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = club.inBag, onCheckedChange = { vm.setInBag(club.id, it) })
+                        Column(Modifier.weight(1f)) {
+                            Text(club.name, fontWeight = FontWeight.Bold)
+                            val src = when (stats.source) {
+                                StatSource.HISTORY -> "${stats.shotCount} shots"
+                                StatSource.MAX_ONLY -> "from max"
+                                StatSource.DEFAULT -> "default, no data yet"
+                            }
+                            Text("Typical ${d(stats.typicalMeters)} · Max ${stats.maxMeters?.let(::d) ?: "–"} · $src",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (open) ClubEditor(state, vm, club.id, ::d)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ClubEditor(state: UiState, vm: CaddieViewModel, clubId: String, d: (Double) -> String) {
+    val u = state.unit
+    val club = state.bag.clubs.first { it.id == clubId }
+    var maxText by remember(clubId, u) {
+        mutableStateOf(club.manualMaxMeters?.let { Math.round(u.fromMeters(it)).toString() } ?: "")
+    }
+    var shotText by remember { mutableStateOf("") }
+
+    Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = maxText, onValueChange = { maxText = it },
+                label = { Text("My max (${u.label})") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = { vm.setManualMax(clubId, maxText.toDoubleOrNull()?.let(u::toMeters)) }) {
+                Text("Save")
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = shotText, onValueChange = { shotText = it },
+                label = { Text("Add a shot (${u.label})") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = {
+                shotText.toDoubleOrNull()?.let { vm.addShot(clubId, u.toMeters(it)) }
+                shotText = ""
+            }) { Text("Add") }
+        }
+        val shots = state.bag.shots.filter { it.clubId == clubId }.sortedByDescending { it.timestampMillis }
+        if (shots.isEmpty()) {
+            Text("No shots yet. Use \"Record a shot\" on the course, or add them here.",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        val fmt = DateFormat.getDateInstance(DateFormat.SHORT)
+        shots.take(30).forEach { shot ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${d(shot.distanceMeters)}  ·  ${fmt.format(Date(shot.timestampMillis))}" +
+                        if (shot.start != null) "  ·  GPS" else "",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { vm.deleteShot(shot.id) }) { Text("Delete") }
+            }
+        }
+    }
+}
