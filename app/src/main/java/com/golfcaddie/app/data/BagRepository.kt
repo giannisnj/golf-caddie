@@ -8,7 +8,15 @@ import java.io.File
 class BagRepository(context: Context) {
     private val file = File(context.filesDir, "bag.json")
 
-    fun load(): Bag = runCatching { Bag.decode(file.readText()) }.getOrElse { Bag.default() }
+    fun load(): Bag {
+        if (!file.exists()) return Bag.default()
+        return runCatching { Bag.decode(file.readText()) }.getOrElse {
+            // Unreadable (e.g. written by a newer version): keep it aside rather than letting the
+            // next save overwrite the shot history.
+            file.renameTo(File(file.parentFile, "bag.unreadable-${System.currentTimeMillis()}.json"))
+            Bag.default()
+        }
+    }
 
     fun save(bag: Bag) {
         val tmp = File(file.parentFile, "bag.json.tmp")

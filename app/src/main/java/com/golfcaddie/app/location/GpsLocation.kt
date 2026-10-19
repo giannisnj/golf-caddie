@@ -7,9 +7,12 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+
+private const val MAX_LAST_KNOWN_AGE_NANOS = 2 * 60 * 1_000_000_000L
 
 /**
  * Live position from the phone's GPS through the plain Android LocationManager
@@ -32,8 +35,10 @@ fun gpsUpdates(context: Context): Flow<Location> = callbackFlow {
     }
     val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
         .filter { manager.allProviders.contains(it) }
+    // A cached fix is only useful if it's recent: yesterday's would put you at home.
     providers.mapNotNull { manager.getLastKnownLocation(it) }
-        .maxByOrNull { it.time }
+        .filter { SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos < MAX_LAST_KNOWN_AGE_NANOS }
+        .maxByOrNull { it.elapsedRealtimeNanos }
         ?.let { trySend(it) }
     providers.forEach {
         manager.requestLocationUpdates(it, 1_000L, 1f, listener, Looper.getMainLooper())

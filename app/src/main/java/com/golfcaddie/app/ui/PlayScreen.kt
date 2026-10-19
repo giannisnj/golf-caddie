@@ -58,7 +58,7 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
             }
             if (state.course != null) {
                 TextButton(onClick = { vm.shiftHole(-1) }) { Text("◀") }
-                val hole = state.situation?.hole
+                val hole = state.hole
                 val par = hole?.par?.let { " · Par $it" } ?: ""
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Hole ${hole?.number ?: "-"}$par", fontWeight = FontWeight.Bold)
@@ -79,7 +79,7 @@ fun PlayScreen(state: UiState, vm: CaddieViewModel) {
 
         CourseMap(
             course = state.course,
-            hole = state.situation?.hole,
+            hole = state.hole,
             player = state.position,
             satellite = state.satellite,
             onTap = vm::onMapTap,
@@ -119,17 +119,28 @@ private fun InfoPanel(state: UiState, vm: CaddieViewModel, d: (Double) -> String
             when {
                 state.course == null -> Text("Load a course: tap \"Choose a course\" above.")
                 state.position == null -> Text(
-                    if (state.simulate) "Tap the map to place yourself." else "Waiting for GPS…",
+                    when {
+                        state.simulate -> "Tap the map to place yourself."
+                        state.preciseLocationOff ->
+                            "Location is set to Approximate, which is too rough for golf. Turn on " +
+                                "Precise location for this app in Settings, or use Simulate GPS."
+                        !state.hasLocationPermission ->
+                            "Location is off for this app. Allow it in Settings, or use Simulate GPS."
+                        else -> "Waiting for GPS…"
+                    },
                 )
                 s == null -> Text("No holes found near you.")
                 else -> {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(d(s.green.center), fontSize = 40.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(8.dp))
-                        Text(if (s.green.pin != null) "to green center" else "to the middle of the green")
+                        Text("to the middle of the green")
                     }
-                    Text("Front ${d(s.green.front)}  ·  Back ${d(s.green.back)}" +
-                        (s.green.pin?.let { "  ·  Pin ${d(it)}" } ?: ""))
+                    Text("Front ${d(s.green.front)}  ·  Back ${d(s.green.back)}")
+                    // An OSM flag is where it stood on mapping day, so it's shown but not planned on.
+                    s.green.pin?.let {
+                        Text("Mapped flag ${d(it)} (may have moved)", style = MaterialTheme.typography.bodySmall)
+                    }
                     s.hazards.take(3).forEach { hz ->
                         val name = when (hz.type) {
                             HazardType.BUNKER -> "Bunker"

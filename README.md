@@ -12,8 +12,9 @@ using free OpenStreetMap course data and your own distance history with each clu
    Look a course up by name with OSM's free Nominatim geocoder.
 2. **Your position**: the phone's GPS through Android's built-in `LocationManager` (no Google Play
    Services or API key needed).
-3. **Distances**: front, center and back of the green (plus the pin, when someone has mapped it), and
-   the reach/carry distance of any bunker or water between you and the green.
+3. **Distances**: front, center and back of the green, and the reach/carry distance of any bunker or
+   water near the line to the green. Clubs are picked for the middle of the green: a flag mapped in
+   OSM is shown, but it's only where the flag stood on the day it was mapped.
 4. **Club pick**: the shortest club whose *typical* distance reaches the target. "Typical" is the average of
    your last 20 shots with that club, with mishits dropped. Until you have 3 shots it's 95% of your max,
    and before that it's an average golfer's distance. If a shorter club reaches only with your best

@@ -42,7 +42,8 @@ class CaddieTest {
         assertEquals(335.0, s.green.front, 1.0)
         assertEquals(365.0, s.green.back, 1.0)
         assertEquals(355.0, s.green.pin!!, 1.0)
-        assertEquals(355.0, s.targetMeters, 1.0)
+        // Plans on the middle of the green: a mapped flag is only where it was on mapping day.
+        assertEquals(350.0, s.targetMeters, 1.0)
     }
 
     @Test

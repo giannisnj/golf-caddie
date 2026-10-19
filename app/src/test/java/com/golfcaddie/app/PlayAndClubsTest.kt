@@ -93,4 +93,65 @@ class PlayAndClubsTest : AppTestBase() {
         compose.onNodeWithText("Typical 143 yd · Max 150 yd · from max").assertExists()
         compose.onRoot().captureRoboImage("build/screenshots/4_clubs_after_recording.png")
     }
+
+    @Test
+    fun courseIsShownBeforeThereIsAPosition() {
+        launch()
+        // No GPS and no simulation yet: the map frames the course instead of (0,0) in the ocean.
+        compose.onNodeWithText("Hole -").assertExists()
+        settle(2)
+        compose.onRoot().captureRoboImage("build/screenshots/0_course_before_position.png")
+        // ▶ goes to hole 1 (it used to skip to hole 2), and the header shows it straight away.
+        compose.onNodeWithText("▶").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Hole 1 · Par ${course.holes.first().par}").assertExists()
+    }
+
+    @Test
+    fun approximateLocationOnlyExplainsWhatToDo() {
+        shadowOf(app).grantPermissions(Manifest.permission.ACCESS_COARSE_LOCATION)
+        launch()
+        compose.onNodeWithText("Location is set to Approximate", substring = true).assertExists()
+    }
+
+    @Test
+    fun tappingBallIsHereStraightAwayKeepsTheShotOpen() {
+        launch()
+        compose.onNodeWithText("Simulate GPS").performClick()
+        compose.onNodeWithText("Record a shot").performClick()
+        compose.waitForIdle()
+        compose.onAllNodesWithText("Driver", substring = true).onLast().performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Ball is here").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Walk to your ball first", substring = true).assertExists()
+        compose.onNodeWithText("OK").performClick()
+        compose.waitForIdle()
+        assertEquals(0, viewModel().state.value.bag.shots.size)
+        compose.onNodeWithText("Ball is here").assertExists()
+    }
+
+    @Test
+    fun leavingSimulationDropsTheFakePosition() {
+        launch()
+        compose.onNodeWithText("Simulate GPS").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Simulate GPS").performClick()
+        compose.waitForIdle()
+        assertEquals(null, viewModel().state.value.position)
+        compose.onNodeWithText("Location is off for this app", substring = true).assertExists()
+    }
+
+    @Test
+    fun unitAndSatelliteSurviveARestart() {
+        launch()
+        compose.onNodeWithText("yd").performClick()
+        compose.onNodeWithText("Satellite").performClick()
+        compose.waitForIdle()
+        scenario.close()
+        launch()
+        val state = viewModel().state.value
+        assertEquals(com.golfcaddie.core.DistanceUnit.METERS, state.unit)
+        assertEquals(false, state.satellite)
+    }
 }

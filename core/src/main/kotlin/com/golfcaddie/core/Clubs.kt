@@ -87,14 +87,16 @@ data class ClubStats(
         const val RECENT_SHOTS = 20
         /** Shots shorter than this fraction of the median are treated as mishits (tops, chunks). */
         const val MISHIT_FRACTION = 0.75
+        /** Anything shorter is a mis-tap or GPS noise, not a full shot with this club. */
+        const val MIN_SHOT_METERS = 10.0
 
         fun of(club: Club, allShots: List<ShotRecord>): ClubStats {
-            val shots = allShots.filter { it.clubId == club.id }
+            val shots = allShots.filter { it.clubId == club.id && it.distanceMeters >= MIN_SHOT_METERS }
                 .sortedByDescending { it.timestampMillis }
                 .take(RECENT_SHOTS)
                 .map { it.distanceMeters }
             val shotMax = shots.maxOrNull()
-            val max = listOfNotNull(shotMax, club.manualMaxMeters).maxOrNull()
+            val max = listOfNotNull(shotMax, club.manualMaxMeters?.takeIf { it >= MIN_SHOT_METERS }).maxOrNull()
 
             if (shots.size >= MIN_SHOTS) {
                 val median = shots.sorted()[shots.size / 2]

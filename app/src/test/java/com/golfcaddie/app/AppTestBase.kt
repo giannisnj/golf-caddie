@@ -51,7 +51,8 @@ abstract class AppTestBase {
     @get:Rule
     val compose = createEmptyComposeRule()
 
-    protected val app: Application = ApplicationProvider.getApplicationContext()
+    // Looked up each time: Robolectric creates a fresh Application for every test.
+    protected val app: Application get() = ApplicationProvider.getApplicationContext()
     protected val course: Course = Overpass.parse(
         javaClass.getResource("/osm/moore_park_sydney.json")!!.readText(),
     ).single()
@@ -64,6 +65,8 @@ abstract class AppTestBase {
             Json.encodeToString(ListSerializer(Course.serializer()), listOf(course)),
         )
         File(app.filesDir, "bag.json").delete()
+        // Saved unit / satellite / course choice would otherwise carry over between tests.
+        app.getSharedPreferences("settings", 0).edit().clear().commit()
     }
 
     @After

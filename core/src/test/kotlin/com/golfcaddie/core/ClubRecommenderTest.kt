@@ -42,6 +42,15 @@ class ClubRecommenderTest {
     }
 
     @Test
+    fun misTapsAndZeroMaxAreIgnored() {
+        // "Ball is here" tapped straight away saves ~2 m; a max of 0 was typed by mistake.
+        val club = Club("driver", "Driver", ClubType.DRIVER, 200.0, manualMaxMeters = 0.0)
+        val s = ClubStats.of(club, shots("driver", 2.0, 0.0))
+        assertEquals(StatSource.DEFAULT, s.source)
+        assertEquals(200.0, s.typicalMeters)
+    }
+
+    @Test
     fun noDataFallsBackToDefault() {
         val s = ClubStats.of(bag.clubs[0], bag.shots)
         assertEquals(StatSource.DEFAULT, s.source)

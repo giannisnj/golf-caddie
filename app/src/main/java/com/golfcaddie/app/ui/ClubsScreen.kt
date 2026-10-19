@@ -29,6 +29,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.golfcaddie.core.ClubStats
 import com.golfcaddie.core.ClubType
+import com.golfcaddie.core.DistanceUnit
 import com.golfcaddie.core.StatSource
 import java.text.DateFormat
 import java.util.Date
@@ -82,16 +83,26 @@ private fun ClubEditor(state: UiState, vm: CaddieViewModel, clubId: String, d: (
         mutableStateOf(club.manualMaxMeters?.let { Math.round(u.fromMeters(it)).toString() } ?: "")
     }
     var shotText by remember { mutableStateOf("") }
+    val maxValue = parseDistance(maxText, u)
+    val shotValue = parseDistance(shotText, u)
+    val maxInvalid = maxText.isNotBlank() && maxValue == null
+    val shotInvalid = shotText.isNotBlank() && shotValue == null
 
     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = maxText, onValueChange = { maxText = it },
                 label = { Text("My max (${u.label})") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                isError = maxInvalid,
+                supportingText = if (maxInvalid) ({ Text(rangeHint(u)) }) else null,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.weight(1f),
             )
-            OutlinedButton(onClick = { vm.setManualMax(clubId, maxText.toDoubleOrNull()?.let(u::toMeters)) }) {
+            // Empty clears your max; anything invalid is left for you to correct.
+            OutlinedButton(
+                onClick = { vm.setManualMax(clubId, maxValue) },
+                enabled = !maxInvalid,
+            ) {
                 Text("Save")
             }
         }
@@ -99,13 +110,18 @@ private fun ClubEditor(state: UiState, vm: CaddieViewModel, clubId: String, d: (
             OutlinedTextField(
                 value = shotText, onValueChange = { shotText = it },
                 label = { Text("Add a shot (${u.label})") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                isError = shotInvalid,
+                supportingText = if (shotInvalid) ({ Text(rangeHint(u)) }) else null,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.weight(1f),
             )
-            OutlinedButton(onClick = {
-                shotText.toDoubleOrNull()?.let { vm.addShot(clubId, u.toMeters(it)) }
-                shotText = ""
-            }) { Text("Add") }
+            OutlinedButton(
+                onClick = {
+                    shotValue?.let { vm.addShot(clubId, it) }
+                    shotText = ""
+                },
+                enabled = shotValue != null,
+            ) { Text("Add") }
         }
         val shots = state.bag.shots.filter { it.clubId == clubId }.sortedByDescending { it.timestampMillis }
         if (shots.isEmpty()) {
@@ -126,3 +142,18 @@ private fun ClubEditor(state: UiState, vm: CaddieViewModel, clubId: String, d: (
         }
     }
 }
+
+private const val MAX_SHOT_METERS = 450.0
+
+private fun rangeHint(unit: DistanceUnit) =
+    "Between ${Math.round(unit.fromMeters(ClubStats.MIN_SHOT_METERS))} and " +
+        "${Math.round(unit.fromMeters(MAX_SHOT_METERS))} ${unit.label}"
+
+/**
+ * A typed distance in meters, or null if it isn't a plausible full shot. Accepts a decimal
+ * comma ("150,5") as typed on many European keyboards.
+ */
+private fun parseDistance(text: String, unit: DistanceUnit): Double? =
+    text.trim().replace(',', '.').toDoubleOrNull()
+        ?.let(unit::toMeters)
+        ?.takeIf { it >= ClubStats.MIN_SHOT_METERS && it <= MAX_SHOT_METERS }

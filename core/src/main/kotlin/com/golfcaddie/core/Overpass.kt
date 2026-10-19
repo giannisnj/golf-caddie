@@ -26,7 +26,11 @@ object Overpass {
         "https://overpass.private.coffee/api/interpreter",
     )
 
-    /** Overpass QL that fetches every golf feature within [radiusMeters] of a point. */
+    /**
+     * Overpass QL for the golf features the app uses within [radiusMeters] of a point.
+     * Fairways, rough and cart paths are left out: they're most of the data and aren't used.
+     * Lakes mapped as multipolygons are included; rivers are not (they can be huge).
+     */
     fun queryAround(center: GeoPoint, radiusMeters: Int = 2500): String {
         val around = "(around:$radiusMeters,${center.lat},${center.lon})"
         return """
@@ -34,9 +38,11 @@ object Overpass {
             (
               way["leisure"="golf_course"]$around;
               relation["leisure"="golf_course"]$around;
-              way["golf"]$around;
+              way["golf"~"^(hole|green|tee|bunker|water_hazard|lateral_water_hazard)$"]$around;
+              relation["golf"~"^(green|bunker|water_hazard|lateral_water_hazard)$"]$around;
               node["golf"="pin"]$around;
               way["natural"="water"]$around;
+              relation["natural"="water"]["water"!~"^(river|canal|stream)$"]$around;
             );
             out geom;
         """.trimIndent()
@@ -57,9 +63,18 @@ object Overpass {
         val firstRing get() = rings.firstOrNull().orEmpty()
     }
 
-    /** Parse an Overpass `out geom` JSON response into courses, nearest-first to [near] if given. */
+    /** Overpass answered HTTP 200 but the query failed (usually a timeout on a busy server). */
+    class QueryFailed(message: String) : Exception(message)
+
+    /**
+     * Parse an Overpass `out geom` JSON response into courses, nearest-first to [near] if given.
+     * Throws [QueryFailed] when the server reports a runtime error, whose results are partial.
+     */
     fun parse(responseJson: String, near: GeoPoint? = null): List<Course> {
         val root = json.parseToJsonElement(responseJson).jsonObject
+        root["remark"]?.jsonPrimitive?.content?.let { remark ->
+            if ("error" in remark || "timed out" in remark) throw QueryFailed(remark)
+        }
         val elements = root["elements"]?.jsonArray ?: return emptyList()
         val features = elements.mapNotNull { toFeature(it.jsonObject) }
 
@@ -99,20 +114,17 @@ object Overpass {
                 unclaimed -= inside.toSet()
             }
             // Course outlines in OSM are sometimes drawn too small. A hole outside every outline
-            // joins the course it connects to: its tee near their green, or its green near their tee.
-            var changed = true
-            while (changed && unclaimed.isNotEmpty()) {
-                changed = false
-                for (h in unclaimed.toList()) {
-                    val i = members.indexOfFirst { course ->
-                        course.any { Geo.distance(it.greenCenter, h.tee) < LINK_M || Geo.distance(h.greenCenter, it.tee) < LINK_M }
-                    }
-                    if (i >= 0) {
-                        members[i] += h
-                        unclaimed -= h
-                        changed = true
-                    }
-                }
+            // joins the course it connects to most closely: its tee near one of their greens, or
+            // its green near one of their tees. Closest links first, so chains grow outward.
+            fun link(h: Hole, course: List<Hole>): Double = course.minOfOrNull {
+                minOf(Geo.distance(it.greenCenter, h.tee), Geo.distance(h.greenCenter, it.tee))
+            } ?: Double.POSITIVE_INFINITY
+            while (unclaimed.isNotEmpty()) {
+                val (h, i, d) = unclaimed.flatMap { h -> members.indices.map { i -> Triple(h, i, link(h, members[i])) } }
+                    .minBy { it.third }
+                if (d >= LINK_M) break
+                members[i] += h
+                unclaimed -= h
             }
             areas.mapIndexed { i, (area, rings) ->
                 val courseHoles = members[i]
@@ -121,9 +133,12 @@ object Overpass {
                     name = area.tags["name"] ?: "Golf course",
                     areas = rings,
                     holes = playingOrder(courseHoles),
+                    // Any part inside the outline or near a hole: a big lake's centre can be far
+                    // away while its shore runs right beside a fairway.
                     hazards = hazards.filter { h ->
-                        val c = Geo.centroid(h.polygon)
-                        rings.any { Geo.contains(it, c) } || courseHoles.any { Geo.distanceToPolyline(c, it.line) < 60.0 }
+                        h.polygon.any { p ->
+                            rings.any { Geo.contains(it, p) } || courseHoles.any { Geo.distanceToPolyline(p, it.line) < 60.0 }
+                        }
                     },
                 )
             }.filter { it.holes.isNotEmpty() } +
@@ -139,26 +154,25 @@ object Overpass {
 
     /**
      * Orders holes the way they're played. With unique numbers that's just 1..18. Clubs with
-     * several loops repeat numbers, so each loop is chained by walking from a green to the
-     * nearest tee of the next number.
+     * several loops repeat numbers, so each hole N is linked to the hole N+1 whose tee is
+     * nearest its green, closest pairs first. Loops come out longest first (18 before 9).
      */
     internal fun playingOrder(holes: List<Hole>): List<Hole> {
         if (holes.map { it.number }.toSet().size == holes.size) return holes.sortedBy { it.number }
-        val left = holes.sortedBy { it.id }.toMutableList()
-        val ordered = mutableListOf<Hole>()
-        while (left.isNotEmpty()) {
-            var cur = left.minBy { it.number }
-            left.remove(cur)
-            ordered += cur
-            while (true) {
-                val next = left.filter { it.number == cur.number + 1 }
-                    .minByOrNull { Geo.distance(cur.greenCenter, it.tee) } ?: break
-                left.remove(next)
-                ordered += next
-                cur = next
+        val next = mutableMapOf<Long, Hole>()
+        val hasPrevious = mutableSetOf<Long>()
+        holes.flatMap { a -> holes.filter { it.number == a.number + 1 }.map { b -> Triple(a, b, Geo.distance(a.greenCenter, b.tee)) } }
+            .sortedBy { it.third }
+            .forEach { (a, b, _) ->
+                if (a.id !in next && b.id !in hasPrevious) {
+                    next[a.id] = b
+                    hasPrevious += b.id
+                }
             }
+        val loops = holes.filter { it.id !in hasPrevious }.map { start ->
+            generateSequence(start) { next[it.id] }.toList()
         }
-        return ordered
+        return loops.sortedWith(compareBy({ it.first().number }, { -it.size }, { it.first().id })).flatten()
     }
 
     private fun buildHole(

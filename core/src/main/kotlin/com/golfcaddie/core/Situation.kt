@@ -29,8 +29,11 @@ data class Situation(
     /** How far off the mapped tee-to-green line the player is (meters). */
     val offLineMeters: Double,
 ) {
-    /** What the club recommendation should cover: the pin if mapped, otherwise the green center. */
-    val targetMeters: Double get() = green.pin ?: green.center
+    /**
+     * What the club recommendation should cover: the middle of the green. A flag mapped in OSM
+     * is wherever it stood on the day it was traced, not where it is today.
+     */
+    val targetMeters: Double get() = green.center
 }
 
 object Caddie {
@@ -89,24 +92,49 @@ object Caddie {
         val (tx, ty) = Geo.toLocal(player, target)
         val ux = tx / targetDist
         val uy = ty / targetDist
+        val limit = targetDist + 30
         return course.hazards.mapNotNull { hz ->
             // Already in it (or standing on its edge): nothing to carry.
             if (Geo.contains(hz.polygon, player)) return@mapNotNull null
-            // Along-track / cross-track position of every hazard vertex.
+            // Hazard outline in along-track / cross-track coordinates.
             val pts = hz.polygon.map { Geo.toLocal(player, it) }.map { (x, y) ->
                 (x * ux + y * uy) to (-x * uy + y * ux)
             }
-            val hit = crossings(player, target, hz.polygon)
-            when {
-                hit != null && hit.second > MIN_HAZARD_CARRY_M && hit.first < targetDist + 30 ->
-                    HazardOnLine(hz.type, hit.first, hit.second)
-                else -> {
-                    val near = pts.filter { (along, cross) -> along > 0 && along < targetDist + 30 && kotlin.math.abs(cross) <= corridorMeters }
-                    if (near.isEmpty() || near.maxOf { it.first } <= MIN_HAZARD_CARRY_M) null
-                    else HazardOnLine(hz.type, near.minOf { it.first }, near.maxOf { it.first })
-                }
+            // Clip every edge to the corridor ahead (not just its corners, so a long straight
+            // shoreline running beside the shot still counts).
+            val alongs = mutableListOf<Double>()
+            for (i in pts.indices) {
+                val (a1, c1) = pts[i]
+                val (a2, c2) = pts[(i + 1) % pts.size]
+                clipToBox(a1, c1, a2, c2, 0.0, limit, -corridorMeters, corridorMeters)?.let { alongs += it }
             }
+            if (alongs.isEmpty() || alongs.max() <= MIN_HAZARD_CARRY_M) null
+            else HazardOnLine(hz.type, alongs.min(), alongs.max())
         }.sortedBy { it.reachMeters }
+    }
+
+    /**
+     * Liang-Barsky clip of segment (a1,c1)-(a2,c2) to the box along in [aMin,aMax],
+     * cross in [cMin,cMax]. Returns the along-track values of the clipped ends, or null.
+     */
+    private fun clipToBox(
+        a1: Double, c1: Double, a2: Double, c2: Double,
+        aMin: Double, aMax: Double, cMin: Double, cMax: Double,
+    ): List<Double>? {
+        val da = a2 - a1
+        val dc = c2 - c1
+        var t0 = 0.0
+        var t1 = 1.0
+        for ((p, q) in listOf(-da to a1 - aMin, da to aMax - a1, -dc to c1 - cMin, dc to cMax - c1)) {
+            if (p == 0.0) {
+                if (q < 0) return null
+            } else {
+                val r = q / p
+                if (p < 0) t0 = maxOf(t0, r) else t1 = minOf(t1, r)
+                if (t0 > t1) return null
+            }
+        }
+        return listOf(a1 + t0 * da, a1 + t1 * da)
     }
 
     /**

@@ -2,10 +2,12 @@ package com.golfcaddie.app.ui
 
 import android.app.Application
 import android.location.Location
+import android.location.LocationManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.golfcaddie.app.data.BagRepository
 import com.golfcaddie.app.data.CourseRepository
+import com.golfcaddie.app.data.Settings
 import com.golfcaddie.app.location.gpsUpdates
 import com.golfcaddie.core.Bag
 import com.golfcaddie.core.Caddie
@@ -15,6 +17,8 @@ import com.golfcaddie.core.Course
 import com.golfcaddie.core.DistanceUnit
 import com.golfcaddie.core.GeoPoint
 import com.golfcaddie.core.Geo
+import com.golfcaddie.core.ClubStats
+import com.golfcaddie.core.Hole
 import com.golfcaddie.core.Recommendation
 import com.golfcaddie.core.ShotRecord
 import com.golfcaddie.core.Simulator
@@ -40,6 +44,8 @@ data class UiState(
     /** Simulation mode: position comes from map taps and the step buttons, not GPS. */
     val simulate: Boolean = false,
     val hasLocationPermission: Boolean = false,
+    /** Location allowed, but only "Approximate": far too rough for golf distances. */
+    val preciseLocationOff: Boolean = false,
     val position: GeoPoint? = null,
     val accuracyMeters: Float? = null,
     /** OSM id of the hole being played (numbers repeat at clubs with several loops). */
@@ -50,32 +56,47 @@ data class UiState(
     val recommendation: Recommendation? = null,
     val pendingShot: PendingShot? = null,
     val satellite: Boolean = true,
-)
+) {
+    /** The hole being shown: the one you're on, or the one picked with ◀ ▶ before there's a position. */
+    val hole: Hole? get() = situation?.hole ?: course?.holes?.firstOrNull { it.id == holeId }
+}
 
 class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     private val courseRepo = CourseRepository(app)
     private val bagRepo = BagRepository(app)
+    private val settings = Settings(app)
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var gpsJob: Job? = null
     private var lastFix: Location? = null
+    /** Bumped for every course download; replies from an older, superseded one are ignored. */
+    private var loadSeq = 0
 
     init {
         val cached = courseRepo.cachedCourses()
-        _state.update { it.copy(bag = bagRepo.load(), courses = cached, course = cached.firstOrNull()) }
+        val course = cached.firstOrNull { it.id == settings.courseId } ?: cached.firstOrNull()
+        _state.update {
+            it.copy(
+                bag = bagRepo.load(), courses = cached, course = course,
+                unit = settings.unit, satellite = settings.satellite,
+            )
+        }
     }
 
     // ---- Location -------------------------------------------------------------------------
 
-    fun onLocationPermission(granted: Boolean) {
-        _state.update { it.copy(hasLocationPermission = granted) }
-        restartGps()
+    /** Called on every resume too, so a permission changed in system Settings is picked up. */
+    fun onLocationPermission(precise: Boolean, approximateOnly: Boolean = false) {
+        val before = _state.value
+        _state.update { it.copy(hasLocationPermission = precise, preciseLocationOff = approximateOnly) }
+        if (before.hasLocationPermission != precise || gpsJob == null) restartGps()
     }
 
     private fun restartGps() {
         gpsJob?.cancel()
+        gpsJob = null
         val s = _state.value
         if (s.simulate || !s.hasLocationPermission) return
         gpsJob = viewModelScope.launch {
@@ -84,10 +105,13 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onFix(fix: Location) {
-        // GPS and the coarser network provider both report; don't let a rough network
-        // fix replace a recent, more precise GPS fix.
+        // GPS and the coarser network provider both report. A network fix doesn't replace a
+        // GPS fix less than 10 s old; GPS fixes are always taken, even when accuracy dips.
         val prev = lastFix
-        if (prev != null && fix.accuracy > prev.accuracy * 2 && fix.time - prev.time < 10_000) return
+        if (prev != null && fix.provider != LocationManager.GPS_PROVIDER &&
+            prev.provider == LocationManager.GPS_PROVIDER &&
+            fix.elapsedRealtimeNanos - prev.elapsedRealtimeNanos < 10_000_000_000L
+        ) return
         lastFix = fix
         _state.update { it.copy(accuracyMeters = if (fix.hasAccuracy()) fix.accuracy else null) }
         setPosition(GeoPoint(fix.latitude, fix.longitude))
@@ -96,6 +120,12 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     fun setSimulate(on: Boolean) {
         _state.update { it.copy(simulate = on, accuracyMeters = null) }
         if (on && _state.value.position == null) jumpToTee()
+        if (!on) {
+            // Don't keep showing the made-up position as if it were real; wait for GPS.
+            lastFix = null
+            _state.update { it.copy(position = null) }
+            recompute()
+        }
         restartGps()
     }
 
@@ -143,10 +173,12 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun loadCourses(block: suspend () -> List<Course>) {
+        val seq = ++loadSeq
         viewModelScope.launch {
             _state.update { it.copy(loading = true, message = null) }
             try {
                 val courses = block()
+                if (seq != loadSeq) return@launch // a newer search replaced this one
                 _state.update {
                     it.copy(
                         courses = courses,
@@ -155,14 +187,15 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 courses.firstOrNull()?.let(::selectCourse)
             } catch (e: Exception) {
-                _state.update { it.copy(message = e.message ?: "Download failed") }
+                if (seq == loadSeq) _state.update { it.copy(message = e.message ?: "Download failed") }
             } finally {
-                _state.update { it.copy(loading = false) }
+                if (seq == loadSeq) _state.update { it.copy(loading = false) }
             }
         }
     }
 
     fun selectCourse(course: Course) {
+        settings.courseId = course.id
         _state.update { it.copy(course = course, holeId = course.holes.firstOrNull()?.id, holeLocked = false) }
         if (_state.value.simulate) jumpToTee() else recompute()
     }
@@ -172,8 +205,13 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         val holes = s.course?.holes ?: return
         if (holes.isEmpty()) return
-        val idx = holes.indexOfFirst { it.id == s.holeId }.coerceAtLeast(0)
-        val next = holes[(idx + delta).mod(holes.size)]
+        val idx = holes.indexOfFirst { it.id == s.holeId }
+        // No hole yet: ▶ goes to the first, ◀ to the last.
+        val next = if (idx == -1) {
+            if (delta > 0) holes.first() else holes.last()
+        } else {
+            holes[(idx + delta).mod(holes.size)]
+        }
         _state.update { it.copy(holeId = next.id, holeLocked = true) }
         if (s.simulate) setPosition(Simulator.atTee(next)) else recompute()
     }
@@ -214,6 +252,14 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
         val pending = s.pendingShot ?: return
         val end = s.position ?: return
         val meters = Geo.distance(pending.start, end)
+        if (meters < ClubStats.MIN_SHOT_METERS) {
+            // Probably tapped before walking to the ball; keep the shot open.
+            _state.update {
+                it.copy(message = "Only ${formatDistance(meters, it.unit)} from where you hit. " +
+                    "Walk to your ball first, or tap Cancel to discard.")
+            }
+            return
+        }
         _state.update { it.copy(pendingShot = null) }
         addShot(pending.club.id, meters, pending.start, end)
         _state.update {
@@ -224,6 +270,7 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelShot() = _state.update { it.copy(pendingShot = null) }
 
     fun addShot(clubId: String, meters: Double, start: GeoPoint? = null, end: GeoPoint? = null) {
+        if (meters < ClubStats.MIN_SHOT_METERS) return
         val shot = ShotRecord(UUID.randomUUID().toString(), clubId, meters, System.currentTimeMillis(), start, end)
         updateBag { it.copy(shots = it.shots + shot) }
     }
@@ -245,8 +292,15 @@ class CaddieViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Settings ----------------------------------------------------------------------------
 
-    fun setUnit(unit: DistanceUnit) = _state.update { it.copy(unit = unit) }
-    fun setSatellite(on: Boolean) = _state.update { it.copy(satellite = on) }
+    fun setUnit(unit: DistanceUnit) {
+        settings.unit = unit
+        _state.update { it.copy(unit = unit) }
+    }
+
+    fun setSatellite(on: Boolean) {
+        settings.satellite = on
+        _state.update { it.copy(satellite = on) }
+    }
     fun clearMessage() = _state.update { it.copy(message = null) }
 }
 

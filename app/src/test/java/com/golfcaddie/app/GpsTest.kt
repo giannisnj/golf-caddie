@@ -5,6 +5,7 @@ import android.app.Application
 import android.location.Location
 import android.location.LocationManager
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -39,11 +40,6 @@ import org.robolectric.annotation.GraphicsMode
 import java.io.File
 import kotlin.math.roundToInt
 
-/**
- * Own SDK level so Robolectric gives it a fresh sandbox: coroutines started on the main
- * thread in an earlier test's sandbox never run here otherwise.
- */
-@Config(sdk = [33], qualifiers = "w411dp-h891dp-xxhdpi")
 class GpsTest : AppTestBase() {
     @Test
     fun realGpsPathDetectsHoleSeven() {
@@ -56,6 +52,7 @@ class GpsTest : AppTestBase() {
             longitude = p.lon
             accuracy = 4.5f
             time = System.currentTimeMillis()
+            elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
         })
         val hole6 = course.holes.single { it.number == 6 }
         val hole7 = course.holes.single { it.number == 7 }
